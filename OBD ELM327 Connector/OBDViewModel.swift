@@ -2,29 +2,25 @@
 //  OBDViewModel.swift
 //  OBD ELM327 Connector
 //
-//  Dual-state OBD processing loop:
+//  OBD polling loop — every 4–6 s an active query cycle runs in sequence:
 //
-//  • PASSIVE  — Waits between active polling cycles. Some ELM327 clones reject AT MT.
+//    Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C
+//    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
+//    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
+//    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
 //
-//  • ACTIVE   — Every 4–6 s Toyota enhanced engine packets are queried,
-//               then ATF Temp is queried only with the supplied custom definition:
-//                 Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C
-//                 Fuel trims : ATSH7E0 + 2103    (Toyota enhanced data) → STFT / LTFT
-//                 Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C (TOYOTA_EOT at bix 72)
-//                 ATF        : ATSH7E0 + 2182, raw − 40 → °C (Toyota oil pan sensor)
-//               After active responses are handled, ATSH7DF is restored before the next polling cycle.
+//  After all responses are handled, ATSH7DF is restored and the cycle repeats.
 
 import Foundation
 import Combine
 
 private enum QueryState {
-    case passive         // AT MT 7E0 running; sniffing for STFT / LTFT
-    case interrupting    // Space sent; awaiting ">" prompt before active queries
+    case passive         // Waiting between active polling cycles
     case queryingToyota2101 // Toyota enhanced engine packet 2101; includes coolant temp
     case queryingToyota2103 // Toyota enhanced engine packet 2103; includes fuel trims
     case queryingEngineOil // Engine oil command sent; awaiting ECU response
     case queryingATF     // ATF command sent; awaiting ECU response
-    case restoringHeader // Restoring normal functional request header before AT MT 7E0
+    case restoringHeader // Restoring normal functional request header before next cycle
 }
 
 enum OBDLogDirection: String {
@@ -70,7 +66,6 @@ final class OBDViewModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private var atfTimerTask: Task<Void, Never>?
     private var atfTimeoutTask: Task<Void, Never>?
-    private var interruptTimeoutTask: Task<Void, Never>?
 
     private var queryState: QueryState = .passive
     private var isInitializing = false
@@ -82,18 +77,12 @@ final class OBDViewModel: ObservableObject {
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let transmissionDA12HeaderCommand = "ATSH7E0" // Engine ECU header — ATF oil pan sensor also on 7E0/7E8
     private let transmissionExtendedAddress = "18"
-    private let transmissionPriorityCommand = "ATCP18"
-    private let resetTransmissionPriorityCommand = "ATCP00"
-    private let enableFlowControlMode1Command = "ATFCSM1"
-    private let disableFlowControlCommand = "ATFCSM0"
     private let disableExtendedAddressCommand = "ATCEA"
-    private let enableATFExtendedAddressCommand = "ATCEA18" // Enable CAN extended addressing, target byte 0x18
     private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header
-    private let transmissionHeaderCommand = "ATSH7E1" // Toyota TCM request header
     private let toyotaEngineDataCommand = "2101" // Toyota enhanced engine data packet
     private let toyotaFuelTrimCommand = "2103"  // Toyota enhanced fuel-trim packet
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
-    private let atfPrimaryCommand  = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor (2016–2020)
+    private let atfPrimaryCommand  = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
 
     // MARK: - Init
 
@@ -131,7 +120,6 @@ final class OBDViewModel: ObservableObject {
     func disconnect() {
         atfTimerTask?.cancel()
         atfTimeoutTask?.cancel()
-        interruptTimeoutTask?.cancel()
         isInitializing = false
         queryState = .passive
         bluetooth.disconnect()
@@ -221,13 +209,6 @@ final class OBDViewModel: ObservableObject {
             }
             parsePassiveLine(line)
 
-        case .interrupting:
-            // The ELM327 sends ">" once AT MT 7E0 has been stopped and it is ready for commands.
-            if line == ">" || line.hasSuffix(">") {
-                beginToyota2101Query()
-            }
-            // All other lines arriving during interruption are residual AT MT 7E0 frames — ignore.
-
         case .queryingToyota2101:
             parseToyota2101Line(line)
 
@@ -249,14 +230,14 @@ final class OBDViewModel: ObservableObject {
 
     // MARK: - Passive Parser — STFT (PID 06) & LTFT (PID 07)
 
-    /// Parses a CAN frame line from the AT MT 7E0 stream.
+    /// Parses unsolicited mode-01 CAN frames from ECU 7E0.
     ///
     /// Expected token layout with ATH1 + ATS1:
     ///   7E0  04  41  PID  DATA  …
     ///   [0] [1] [2] [3]  [4]
     ///
-    /// 0x41 = Mode 01 positive response (0x01 + 0x40)
-    /// Formula: fuelTrim% = (RawByte × 0.78125) − 100
+    /// 0x41 = mode-01 positive response (0x01 + 0x40)
+    /// Formula: fuelTrim% = (rawByte × 0.78125) − 100
     private func parsePassiveLine(_ line: String) {
         let tokens = line.components(separatedBy: " ").filter { !$0.isEmpty }
         guard tokens.count >= 5,
@@ -445,9 +426,8 @@ final class OBDViewModel: ObservableObject {
 
     // MARK: - Active Parser — Engine Oil Temperature
 
-    /// Parses the ECU response to standard engine oil temperature PID 5C.
     /// Parses Toyota mode-21 PID 51 from engine ECU 7E0 (7E8 responds) — multi-frame response.
-    /// TOYOTA_EOT is at bix 72 = data byte 9 after "61 51", i.e. payload[11].
+    /// TOYOTA_EOT at bix 72 = data byte 9 after "61 51" = payload[11].
     /// Formula: engine oil temp (°C) = payload[11] − 40.
     private func parseEngineOilLine(_ line: String) {
         guard let payload = completePayloadTokens(from: line) else { return }
@@ -520,7 +500,6 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginToyota2101Query() {
-        interruptTimeoutTask?.cancel()
         atfTimeoutTask?.cancel()
         resetMultiFrameBuffer()
         queryState = .queryingToyota2101
@@ -589,7 +568,6 @@ final class OBDViewModel: ObservableObject {
 
     private func returnToPassive() {
         atfTimeoutTask?.cancel()
-        interruptTimeoutTask?.cancel()
         queryState = .restoringHeader
         connectionStatus = "Restoring OBD Header..."
         sendCommand(disableExtendedAddressCommand)
@@ -629,25 +607,11 @@ final class OBDViewModel: ObservableObject {
         beginToyota2101Query()
     }
 
-    private func armInterruptTimeout() {
-        interruptTimeoutTask?.cancel()
-        interruptTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled, let self, self.queryState == .interrupting else { return }
-            self.beginToyota2101Query()
-        }
-    }
-
     // MARK: - Communication Log
 
     private func sendCommand(_ command: String) {
         appendLog(direction: .sent, message: command)
         bluetooth.sendCommand(command)
-    }
-
-    private func sendInterrupt() {
-        appendLog(direction: .sent, message: "<interrupt>")
-        bluetooth.sendInterrupt()
     }
 
     private func appendLog(direction: OBDLogDirection, message: String) {
@@ -718,7 +682,7 @@ final class OBDViewModel: ObservableObject {
                 self.beginATFQuery()
             case .queryingATF:
                 self.returnToPassive()
-            case .passive, .interrupting, .restoringHeader:
+            case .passive, .restoringHeader:
                 break
             }
         }
