@@ -9,8 +9,7 @@
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
 //    Coolant V2 : ATSH7C0 + 2123, raw × 0.5 → °C         (Toyota mode-21, PID 23, ECU 7C0)
-//                   payload[2] → TOYOTA_ECT_7C0 (Engine Coolant Temp)
-//                   payload[3] → TOYOTA_COOLANT_T (Coolant Temp)
+//                   payload[2] → both TOYOTA_ECT_7C0 and TOYOTA_COOLANT_T (single data byte)
 //
 //  After all responses are handled, ATSH7DF is restored and the cycle repeats.
 
@@ -517,8 +516,8 @@ final class OBDViewModel: ObservableObject {
     // MARK: - Active Parser — Coolant Temp V2 (ECU 7C0, command 2123)
 
     /// Parses Toyota mode-21 PID 23 from ECU 7C0 (7C8 responds) — single-frame response.
-    /// payload[2] → TOYOTA_ECT_7C0 (Engine Coolant Temp), payload[3] → TOYOTA_COOLANT_T.
-    /// Formula: °C = raw × 0.5 for both signals.
+    /// Response: 7C8 03 61 23 XX — both TOYOTA_ECT_7C0 and TOYOTA_COOLANT_T read payload[2].
+    /// Formula: °C = raw × 0.5.
     private func parseCoolantV2Line(_ line: String) {
         guard let payload = completePayloadTokens(from: line) else { return }
 
@@ -527,12 +526,12 @@ final class OBDViewModel: ObservableObject {
             return
         }
 
-        if payload.count > 3,
+        if payload.count > 2,
            payload[0] == "61", payload[1] == "23",
-           let rawECT     = UInt8(payload[2], radix: 16),
-           let rawCoolant = UInt8(payload[3], radix: 16) {
-            coolantTempECT = Double(rawECT)     * 0.5
-            coolantTempV2  = Double(rawCoolant) * 0.5
+           let raw = UInt8(payload[2], radix: 16) {
+            let temp = Double(raw) * 0.5
+            coolantTempECT = temp
+            coolantTempV2  = temp
             lastUpdate = Date()
             returnToPassive()
             return
