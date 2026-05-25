@@ -8,6 +8,9 @@
 //    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
+//    Coolant V2 : ATSH7C0 + 2123, raw × 0.5 → °C         (Toyota mode-21, PID 23, ECU 7C0)
+//                   payload[2] → TOYOTA_ECT_7C0 (Engine Coolant Temp)
+//                   payload[3] → TOYOTA_COOLANT_T (Coolant Temp)
 //
 //  After all responses are handled, ATSH7DF is restored and the cycle repeats.
 
@@ -19,8 +22,9 @@ private enum QueryState {
     case queryingToyota2101 // Toyota enhanced engine packet 2101; includes coolant temp
     case queryingToyota2103 // Toyota enhanced engine packet 2103; includes fuel trims
     case queryingEngineOil // Engine oil command sent; awaiting ECU response
-    case queryingATF     // ATF command sent; awaiting ECU response
-    case restoringHeader // Restoring normal functional request header before next cycle
+    case queryingATF       // ATF command sent; awaiting ECU response
+    case queryingCoolantV2 // 7C0/2123 coolant V2 command sent; awaiting ECU response
+    case restoringHeader   // Restoring normal functional request header before next cycle
 }
 
 enum OBDLogDirection: String {
@@ -45,6 +49,8 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var coolantTemp: Double?
     @Published private(set) var engineOilTemp: Double?
     @Published private(set) var atfTemp: Double?
+    @Published private(set) var coolantTempECT: Double?   // TOYOTA_ECT_7C0 from 7C0/2123
+    @Published private(set) var coolantTempV2: Double?    // TOYOTA_COOLANT_T from 7C0/2123
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -82,13 +88,19 @@ final class OBDViewModel: ObservableObject {
     private let toyotaEngineDataCommand = "2101" // Toyota enhanced engine data packet
     private let toyotaFuelTrimCommand = "2103"  // Toyota enhanced fuel-trim packet
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
-    private let atfPrimaryCommand  = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
+    private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
+    private let coolantV2HeaderCommand = "ATSH7C0" // Toyota coolant ECU (V2 definition)
+    private let coolantV2Command     = "2123"     // Toyota mode 21, PID 23 — ECU 7C0, response from 7C8
 
     // MARK: - Init
 
     init() {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         logFileURL = documentsURL.appendingPathComponent(logFileNameOnDisk)
+
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" { return }
+        #endif
 
         bluetooth.onStateChanged = { [weak self] state in
             Task { @MainActor [weak self] in
@@ -220,6 +232,9 @@ final class OBDViewModel: ObservableObject {
 
         case .queryingATF:
             parseATFLine(line)
+
+        case .queryingCoolantV2:
+            parseCoolantV2Line(line)
 
         case .restoringHeader:
             if line == ">" || line.hasSuffix(">") {
@@ -480,12 +495,12 @@ final class OBDViewModel: ObservableObject {
         if let raw = rawByte(after: ["61", "82"], in: payload) {
             atfTemp = Double(raw) - 40.0
             lastUpdate = Date()
-            returnToPassive()
+            beginCoolantV2Query()
             return
         }
 
         if payload.first == "7F" {
-            returnToPassive()
+            beginCoolantV2Query()
             return
         }
 
@@ -496,7 +511,58 @@ final class OBDViewModel: ObservableObject {
         let isTerminal = line.contains("NO DATA")
                       || line.contains("ERROR")
                       || line.contains("UNABLE TO CONNECT")
+        if isTerminal { beginCoolantV2Query() }
+    }
+
+    // MARK: - Active Parser — Coolant Temp V2 (ECU 7C0, command 2123)
+
+    /// Parses Toyota mode-21 PID 23 from ECU 7C0 (7C8 responds) — single-frame response.
+    /// payload[2] → TOYOTA_ECT_7C0 (Engine Coolant Temp), payload[3] → TOYOTA_COOLANT_T.
+    /// Formula: °C = raw × 0.5 for both signals.
+    private func parseCoolantV2Line(_ line: String) {
+        guard let payload = completePayloadTokens(from: line) else { return }
+
+        if payload.first == "7F" {
+            returnToPassive()
+            return
+        }
+
+        if payload.count > 3,
+           payload[0] == "61", payload[1] == "23",
+           let rawECT     = UInt8(payload[2], radix: 16),
+           let rawCoolant = UInt8(payload[3], radix: 16) {
+            coolantTempECT = Double(rawECT)     * 0.5
+            coolantTempV2  = Double(rawCoolant) * 0.5
+            lastUpdate = Date()
+            returnToPassive()
+            return
+        }
+
+        handleNonFrameCoolantV2Line(line)
+    }
+
+    private func handleNonFrameCoolantV2Line(_ line: String) {
+        let isTerminal = line.contains("NO DATA")
+                      || line.contains("ERROR")
+                      || line.contains("UNABLE TO CONNECT")
         if isTerminal { returnToPassive() }
+    }
+
+    private func beginCoolantV2Query() {
+        atfTimeoutTask?.cancel()
+        resetMultiFrameBuffer()
+        queryState = .queryingCoolantV2
+        connectionStatus = "Querying Coolant Temp (V2)..."
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendCommand(self.disableExtendedAddressCommand)
+            try? await Task.sleep(for: .milliseconds(150))
+            self.sendCommand(self.coolantV2HeaderCommand)
+            try? await Task.sleep(for: .milliseconds(150))
+            guard self.queryState == .queryingCoolantV2 else { return }
+            self.sendCommand(self.coolantV2Command)
+            self.armActiveTimeout()
+        }
     }
 
     private func beginToyota2101Query() {
@@ -666,6 +732,25 @@ final class OBDViewModel: ObservableObject {
         return formatter
     }()
 
+    // MARK: - Preview
+
+#if DEBUG
+    static var preview: OBDViewModel {
+        let vm = OBDViewModel()
+        vm.stft          = 2.3
+        vm.ltft          = -1.6
+        vm.coolantTemp   = 87.0
+        vm.coolantTempECT = 89.5
+        vm.coolantTempV2 = 88.0
+        vm.engineOilTemp = 95.0
+        vm.atfTemp       = 72.0
+        vm.connectionStatus = "Active Polling"
+        vm.isConnected   = true
+        vm.lastUpdate    = Date()
+        return vm
+    }
+#endif
+
     /// Safety net: if an active query gets no response, advance or reset after 5 s.
     private func armActiveTimeout() {
         atfTimeoutTask?.cancel()
@@ -681,6 +766,8 @@ final class OBDViewModel: ObservableObject {
             case .queryingEngineOil:
                 self.beginATFQuery()
             case .queryingATF:
+                self.beginCoolantV2Query()
+            case .queryingCoolantV2:
                 self.returnToPassive()
             case .passive, .restoringHeader:
                 break

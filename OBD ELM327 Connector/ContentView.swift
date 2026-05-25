@@ -16,6 +16,7 @@ struct ContentView: View {
                     fuelTrimCard
                     atfCard
                     coolantCard
+                    coolantV2Card
                     engineOilCard
                     communicationLogCard
                     Spacer(minLength: 8)
@@ -151,6 +152,48 @@ struct ContentView: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    // MARK: - Coolant Temp V2 Card
+
+    private var coolantV2Card: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Coolant Temp (V2)", systemImage: "thermometer.medium")
+                .font(.headline)
+            HStack(spacing: 0) {
+                coolantV2Cell(label: "ECT", subtitle: "Engine Coolant", value: viewModel.coolantTempECT)
+                Divider().frame(height: 60)
+                coolantV2Cell(label: "Coolant", subtitle: "7C0 Sensor", value: viewModel.coolantTempV2)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func coolantV2Cell(label: String, subtitle: String, value: Double?) -> some View {
+        VStack(spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value.map { String(format: "%.1f", $0) } ?? "—")
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .foregroundStyle(coolantV2TempColor(value))
+                    .monospacedDigit()
+                if value != nil {
+                    Text("°C")
+                        .font(.callout.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Engine Oil Temp Card
@@ -360,6 +403,13 @@ struct ContentView: View {
         return "Hot"
     }
 
+    private func coolantV2TempColor(_ temp: Double?) -> Color {
+        guard let t = temp else { return .primary }
+        if t < 95  { return .green }
+        if t < 105 { return .orange }
+        return .red
+    }
+
     private var engineOilColor: Color {
         guard let t = viewModel.engineOilTemp else { return .primary }
         if t < 105 { return .green }
@@ -375,6 +425,14 @@ struct ContentView: View {
     }
 }
 
+#if DEBUG
+extension ContentView {
+    init(viewModel: OBDViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+    }
+}
+#endif
+
 #Preview {
-    ContentView()
+    ContentView(viewModel: .preview)
 }
