@@ -102,11 +102,6 @@ final class OBDBluetoothManager: NSObject, ObservableObject {
         transmit(command + "\r")
     }
 
-    /// Sends a single space character — the canonical way to interrupt ELM327's AT MA mode.
-    func sendInterrupt() {
-        transmit(" ")
-    }
-
     // MARK: - Private
 
     private func beginScanning() {
@@ -150,7 +145,7 @@ final class OBDBluetoothManager: NSObject, ObservableObject {
     /// Appends a raw BLE chunk to the buffer and emits complete lines.
     /// ELM327 uses \r as the line terminator. The ">" command prompt is emitted
     /// as a special sentinel line so the state machine can detect when the adapter
-    /// is ready to receive the next command after AT MA is interrupted.
+    /// is ready for the next command (used when restoring the OBD header).
     private func processIncoming(_ chunk: String) {
         receiveBuffer += chunk
         while true {

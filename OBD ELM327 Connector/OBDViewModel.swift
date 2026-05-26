@@ -2,14 +2,14 @@
 //  OBDViewModel.swift
 //  OBD ELM327 Connector
 //
-//  OBD polling loop — every 4–6 s an active query cycle runs in sequence:
+//  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
 //    Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C
 //    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
 //    Coolant V2 : ATSH7C0 + 2123, raw × 0.5 → °C         (Toyota mode-21, PID 23, ECU 7C0)
-//                   payload[2] → both TOYOTA_ECT_7C0 and TOYOTA_COOLANT_T (single data byte)
+//                   payload[2] → coolantTempV2 (single data byte)
 //
 //  After all responses are handled, ATSH7DF is restored and the cycle repeats.
 
@@ -48,7 +48,6 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var coolantTemp: Double?
     @Published private(set) var engineOilTemp: Double?
     @Published private(set) var atfTemp: Double?
-    @Published private(set) var coolantTempECT: Double?   // TOYOTA_ECT_7C0 from 7C0/2123
     @Published private(set) var coolantTempV2: Double?    // TOYOTA_COOLANT_T from 7C0/2123
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
@@ -69,8 +68,8 @@ final class OBDViewModel: ObservableObject {
 
     // streamTask must never be cancelled — it owns the single AsyncStream iterator.
     private var streamTask: Task<Void, Never>?
-    private var atfTimerTask: Task<Void, Never>?
-    private var atfTimeoutTask: Task<Void, Never>?
+    private var pollTimerTask: Task<Void, Never>?
+    private var activeQueryTimeoutTask: Task<Void, Never>?
 
     private var queryState: QueryState = .passive
     private var isInitializing = false
@@ -80,10 +79,8 @@ final class OBDViewModel: ObservableObject {
     private let maxLogEntries = 120
     private let logFileNameOnDisk = "obd_tx_rx_log.txt"
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
-    private let transmissionDA12HeaderCommand = "ATSH7E0" // Engine ECU header — ATF oil pan sensor also on 7E0/7E8
-    private let transmissionExtendedAddress = "18"
     private let disableExtendedAddressCommand = "ATCEA"
-    private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header
+    private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header (also carries the ATF oil-pan sensor on 7E0/7E8)
     private let toyotaEngineDataCommand = "2101" // Toyota enhanced engine data packet
     private let toyotaFuelTrimCommand = "2103"  // Toyota enhanced fuel-trim packet
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
@@ -129,8 +126,8 @@ final class OBDViewModel: ObservableObject {
     }
 
     func disconnect() {
-        atfTimerTask?.cancel()
-        atfTimeoutTask?.cancel()
+        pollTimerTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         isInitializing = false
         queryState = .passive
         bluetooth.disconnect()
@@ -146,14 +143,14 @@ final class OBDViewModel: ObservableObject {
             // Characteristics may still be discovering; init sequence handles the delay via ATZ.
             Task { @MainActor [weak self] in await self?.runELM327Init() }
         case .disconnected, .error:
-            atfTimerTask?.cancel()
-            atfTimeoutTask?.cancel()
+            pollTimerTask?.cancel()
+            activeQueryTimeoutTask?.cancel()
             isInitializing = false
             isConnected = false
             connectionStatus = state.rawValue
         case .bluetoothOff, .unauthorized:
-            atfTimerTask?.cancel()
-            atfTimeoutTask?.cancel()
+            pollTimerTask?.cancel()
+            activeQueryTimeoutTask?.cancel()
             isInitializing = false
             isConnected = false
             connectionStatus = state.rawValue
@@ -215,10 +212,7 @@ final class OBDViewModel: ObservableObject {
 
         switch queryState {
         case .passive:
-            if line.contains("BUFFER FULL") || line == ">" || line == "?" {
-                return
-            }
-            parsePassiveLine(line)
+            break   // Nothing is requested between cycles; ignore incoming lines.
 
         case .queryingToyota2101:
             parseToyota2101Line(line)
@@ -239,38 +233,6 @@ final class OBDViewModel: ObservableObject {
             if line == ">" || line.hasSuffix(">") {
                 startPassiveMonitoring()
             }
-        }
-    }
-
-    // MARK: - Passive Parser — STFT (PID 06) & LTFT (PID 07)
-
-    /// Parses unsolicited mode-01 CAN frames from ECU 7E0.
-    ///
-    /// Expected token layout with ATH1 + ATS1:
-    ///   7E0  04  41  PID  DATA  …
-    ///   [0] [1] [2] [3]  [4]
-    ///
-    /// 0x41 = mode-01 positive response (0x01 + 0x40)
-    /// Formula: fuelTrim% = (rawByte × 0.78125) − 100
-    private func parsePassiveLine(_ line: String) {
-        let tokens = line.components(separatedBy: " ").filter { !$0.isEmpty }
-        guard tokens.count >= 5,
-              tokens[0] == "7E0",
-              tokens[2] == "41",
-              let rawByte = UInt8(tokens[4], radix: 16)
-        else { return }
-
-        let trimPct = (Double(rawByte) * 0.78125) - 100.0
-
-        switch tokens[3] {
-        case "06":
-            stft = trimPct
-            lastUpdate = Date()
-        case "07":
-            ltft = trimPct
-            lastUpdate = Date()
-        default:
-            break
         }
     }
 
@@ -414,9 +376,7 @@ final class OBDViewModel: ObservableObject {
         if payload.count > 2,
            payload[0] == "61", payload[1] == "23",
            let raw = UInt8(payload[2], radix: 16) {
-            let temp = Double(raw) * 0.5
-            coolantTempECT = temp
-            coolantTempV2  = temp
+            coolantTempV2 = Double(raw) * 0.5
             lastUpdate = Date()
             returnToPassive()
             return
@@ -433,7 +393,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginCoolantV2Query() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         parser.reset()
         queryState = .queryingCoolantV2
         connectionStatus = "Querying Coolant Temp (V2)..."
@@ -450,7 +410,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginToyota2101Query() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         parser.reset()
         queryState = .queryingToyota2101
         connectionStatus = "Querying Toyota Engine Data..."
@@ -458,7 +418,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginToyota2103Query() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         parser.reset()
         queryState = .queryingToyota2103
         connectionStatus = "Querying Toyota Fuel Trims..."
@@ -479,7 +439,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginEngineOilQuery() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         parser.reset()
         queryState = .queryingEngineOil
         connectionStatus = "Querying Engine Oil Temp..."
@@ -496,19 +456,19 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func beginATFQuery() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         queryState = .queryingATF
         connectionStatus = "Querying ATF Temp..."
         sendATFRequest()
     }
 
     private func sendATFRequest() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.sendCommand(self.disableExtendedAddressCommand)
             try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand(self.transmissionDA12HeaderCommand)
+            self.sendCommand(self.engineHeaderCommand)
             try? await Task.sleep(for: .milliseconds(150))
             guard self.queryState == .queryingATF else { return }
             self.sendCommand(self.atfPrimaryCommand)
@@ -517,7 +477,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func returnToPassive() {
-        atfTimeoutTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
         queryState = .restoringHeader
         connectionStatus = "Restoring OBD Header..."
         sendCommand(disableExtendedAddressCommand)
@@ -539,8 +499,8 @@ final class OBDViewModel: ObservableObject {
     // MARK: - Active Query Scheduling
 
     private func scheduleNextActiveQuery() {
-        atfTimerTask?.cancel()
-        atfTimerTask = Task { @MainActor [weak self] in
+        pollTimerTask?.cancel()
+        pollTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let stored = UserDefaults.standard.double(forKey: "pollingDelay")
             let delay = stored > 0 ? stored : 1.0
@@ -626,7 +586,6 @@ final class OBDViewModel: ObservableObject {
         vm.stft          = 2.3
         vm.ltft          = -1.6
         vm.coolantTemp   = 87.0
-        vm.coolantTempECT = 89.5
         vm.coolantTempV2 = 88.0
         vm.engineOilTemp = 95.0
         vm.atfTemp       = 72.0
@@ -639,8 +598,8 @@ final class OBDViewModel: ObservableObject {
 
     /// Safety net: if an active query gets no response, advance or reset after 5 s.
     private func armActiveTimeout() {
-        atfTimeoutTask?.cancel()
-        atfTimeoutTask = Task { @MainActor [weak self] in
+        activeQueryTimeoutTask?.cancel()
+        activeQueryTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self else { return }
 

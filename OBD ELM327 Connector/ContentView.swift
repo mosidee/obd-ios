@@ -325,7 +325,7 @@ struct ContentView: View {
 
     private var statusDotColor: Color {
         let s = viewModel.connectionStatus
-        if s.contains("Monitoring") || s.contains("Connected") { return .green }
+        if s.contains("Polling") || s.contains("Connected") || s.contains("Restoring") { return .green }
         if s.contains("Querying")   { return .cyan }
         if s.contains("Scanning") || s.contains("Connecting") || s.contains("Initialising") { return .yellow }
         if s.contains("Error") || s.contains("Off") || s.contains("Unauthorized") { return .red }
@@ -351,20 +351,6 @@ struct ContentView: View {
         guard let t = viewModel.atfTemp else { return "" }
         if t < 90  { return "Normal" }
         if t < 110 { return "Warm" }
-        return "Hot"
-    }
-
-    private var coolantColor: Color {
-        guard let t = viewModel.coolantTemp else { return .primary }
-        if t < 95  { return .green }
-        if t < 105 { return .orange }
-        return .red
-    }
-
-    private var coolantLabel: String {
-        guard let t = viewModel.coolantTemp else { return "" }
-        if t < 95  { return "Normal" }
-        if t < 105 { return "Warm" }
         return "Hot"
     }
 
