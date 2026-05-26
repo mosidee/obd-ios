@@ -77,6 +77,7 @@ final class OBDViewModel: ObservableObject {
     private var multiFramePayload: [String] = []
     private var multiFrameExpectedLength: Int?
 
+    private let loggingEnabled = false   // set true to re-enable TX/RX log
     private let maxLogEntries = 120
     private let logFileNameOnDisk = "obd_tx_rx_log.txt"
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
@@ -657,7 +658,8 @@ final class OBDViewModel: ObservableObject {
         atfTimerTask?.cancel()
         atfTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let delay = Double.random(in: 4...6)
+            let stored = UserDefaults.standard.double(forKey: "pollingDelay")
+            let delay = stored > 0 ? stored : 1.0
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             self.triggerActiveQuery()
@@ -680,6 +682,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func appendLog(direction: OBDLogDirection, message: String) {
+        guard loggingEnabled else { return }
         let entry = OBDCommunicationLogEntry(
             timestamp: Date(),
             direction: direction,

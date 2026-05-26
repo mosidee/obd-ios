@@ -7,6 +7,7 @@ import UIKit
 
 struct ContentView: View {
     @StateObject private var viewModel = OBDViewModel()
+    @State private var showingSettings = false
 
     var body: some View {
         NavigationView {
@@ -14,11 +15,9 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     statusRow
                     fuelTrimCard
-                    atfCard
+                    oilTempsCard
                     coolantCard
-                    coolantV2Card
-                    engineOilCard
-                    communicationLogCard
+                    // communicationLogCard
                     Spacer(minLength: 8)
                     connectButton
                 }
@@ -26,6 +25,16 @@ struct ContentView: View {
             }
             .navigationTitle("OBD-II Monitor")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showingSettings = true } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+            }
         }
     }
 
@@ -92,78 +101,65 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - ATF Temp Card
+    // MARK: - Oil Temperatures Card (ATF + Engine Oil)
 
-    private var atfCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Transmission Fluid Temp", systemImage: "thermometer.medium")
+    private var oilTempsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Oil Temperatures", systemImage: "thermometer.medium")
                 .font(.headline)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(viewModel.atfTemp.map { String(format: "%.1f", $0) } ?? "—")
-                    .font(.system(size: 52, weight: .bold, design: .rounded))
-                    .foregroundStyle(atfColor)
-                    .monospacedDigit()
-                if viewModel.atfTemp != nil {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("°C")
-                            .font(.title2.bold())
-                            .foregroundStyle(.secondary)
-                        Text(atfLabel)
-                            .font(.caption2)
-                            .foregroundStyle(atfColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(atfColor.opacity(0.15), in: Capsule())
-                    }
-                }
+            HStack(spacing: 0) {
+                oilTempCell(label: "Trans Fluid", value: viewModel.atfTemp, color: atfColor, badge: atfLabel)
+                Divider().frame(height: 60)
+                oilTempCell(label: "Engine Oil", value: viewModel.engineOilTemp, color: engineOilColor, badge: engineOilLabel)
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func oilTempCell(label: String, value: Double?, color: Color, badge: String) -> some View {
+        VStack(spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value.map { String(format: "%.1f", $0) } ?? "—")
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .monospacedDigit()
+                if value != nil {
+                    Text("°C")
+                        .font(.callout.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if value != nil {
+                Text(badge)
+                    .font(.caption2)
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(color.opacity(0.15), in: Capsule())
+            } else {
+                Text(" ").font(.caption2)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Coolant Temp Card
 
     private var coolantCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             Label("Coolant Temp", systemImage: "thermometer.medium")
                 .font(.headline)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(viewModel.coolantTemp.map { String(format: "%.1f", $0) } ?? "—")
-                    .font(.system(size: 52, weight: .bold, design: .rounded))
-                    .foregroundStyle(coolantColor)
-                    .monospacedDigit()
-                if viewModel.coolantTemp != nil {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("°C")
-                            .font(.title2.bold())
-                            .foregroundStyle(.secondary)
-                        Text(coolantLabel)
-                            .font(.caption2)
-                            .foregroundStyle(coolantColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(coolantColor.opacity(0.15), in: Capsule())
-                    }
-                }
-            }
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    // MARK: - Coolant Temp V2 Card
-
-    private var coolantV2Card: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Coolant Temp (V2)", systemImage: "thermometer.medium")
-                .font(.headline)
             HStack(spacing: 0) {
-                coolantV2Cell(label: "ECT", subtitle: "Engine Coolant", value: viewModel.coolantTempECT)
+                coolantV2Cell(label: "7E0", subtitle: "2101 sensor", value: viewModel.coolantTemp)
                 Divider().frame(height: 60)
-                coolantV2Cell(label: "Coolant", subtitle: "7C0 Sensor", value: viewModel.coolantTempV2)
+                coolantV2Cell(label: "7C0", subtitle: "2123 sensor", value: viewModel.coolantTempV2)
             }
         }
         .padding()
@@ -194,37 +190,6 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
-    }
-
-    // MARK: - Engine Oil Temp Card
-
-    private var engineOilCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Engine Oil Temp", systemImage: "oilcan")
-                .font(.headline)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(viewModel.engineOilTemp.map { String(format: "%.1f", $0) } ?? "—")
-                    .font(.system(size: 52, weight: .bold, design: .rounded))
-                    .foregroundStyle(engineOilColor)
-                    .monospacedDigit()
-                if viewModel.engineOilTemp != nil {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("°C")
-                            .font(.title2.bold())
-                            .foregroundStyle(.secondary)
-                        Text(engineOilLabel)
-                            .font(.caption2)
-                            .foregroundStyle(engineOilColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(engineOilColor.opacity(0.15), in: Capsule())
-                    }
-                }
-            }
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
     }
 
     // MARK: - Communication Log
@@ -422,6 +387,48 @@ struct ContentView: View {
         if t < 105 { return "Normal" }
         if t < 125 { return "Warm" }
         return "Hot"
+    }
+}
+
+// MARK: - Settings View
+
+struct SettingsView: View {
+    @AppStorage("pollingDelay")    private var pollingDelay: Double = 1.0
+    @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Polling") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Delay between cycles")
+                            Spacer()
+                            Text(String(format: "%.1f s", pollingDelay))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $pollingDelay, in: 0.5...10.0, step: 0.5)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Display") {
+                    Toggle("Keep Screen Awake", isOn: $keepScreenAwake)
+                        .onChange(of: keepScreenAwake) { _, newValue in
+                            UIApplication.shared.isIdleTimerDisabled = newValue
+                        }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 
