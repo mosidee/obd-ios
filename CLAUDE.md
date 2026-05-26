@@ -9,24 +9,26 @@ Use the Xcode MCP tools:
 - **Quick diagnostics** (no full build): `mcp__xcode-tools__XcodeRefreshCodeIssuesInFile` — use this after editing Swift files to catch type errors fast
 - **Render preview**: `mcp__xcode-tools__RenderPreview` on `ContentView.swift`
 
-There are no automated tests in this project.
+**Tests**: Run via Xcode's Test action (⌘U) on the `OBD ELM327 ConnectorTests` target. Tests use the Swift Testing framework (`import Testing`, `@Suite`/`@Test`/`#expect`) and cover `OBDParser` (frame assembly, token stripping) plus the value-conversion formulas. `xcodebuild` is unavailable from the CLI here (only CommandLineTools is installed), so tests can't be run from the shell.
 
 ## Architecture
 
-Three files carry all the logic:
+Four files carry all the logic:
 
 **`OBDBluetoothManager.swift`** — Pure BLE transport. Scans for ELM327 adapters (service UUIDs FFF0/18F0/FFE0), manages CoreBluetooth lifecycle, and exposes a single `AsyncStream<String>` of complete ELM327 lines split on `\r`. Contains zero OBD logic. `CBCentralManager` is only created when `startScanning()` is called (not at init), which keeps preview-safe.
 
-**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle every 4–6 seconds. Lines from `OBDBluetoothManager.lines` are routed to the current parser based on `QueryState`. Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempECT`, `coolantTempV2`.
+**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle (interval from the `pollingDelay` setting, default 1.0 s). Lines from `OBDBluetoothManager.lines` are routed based on `QueryState` and decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempV2`.
 
-**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders temperature cards, fuel trim cells, and a live TX/RX log. Uses `#if DEBUG` extension init + `OBDViewModel.preview` static factory for SwiftUI previews.
+**`OBDParser.swift`** — Frame decoding, extracted from `OBDViewModel` so it's unit-testable without `@MainActor`/Bluetooth. A `struct` holding the multi-frame accumulation state; exposes `completePayloadTokens(from:)` (mutating, multi-frame), `responsePayloadTokens(from:)` (stateless, single-frame), `reset()`, and the static `rawByte(after:in:)`. Contains zero CoreBluetooth or UI code.
+
+**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders temperature cards, fuel trim cells, and a live TX/RX log, plus a `SettingsView` sheet (polling interval, keep-screen-awake via `UIApplication.shared.isIdleTimerDisabled`, both `@AppStorage`-backed). Uses `#if DEBUG` extension init + `OBDViewModel.preview` static factory for SwiftUI previews.
 
 ## OBD Polling Chain
 
 Each cycle executes in sequence; each parser calls the next `begin*Query()` on success, NRC (`7F`), or error:
 
 ```
-passive (4–6 s wait)
+passive (pollingDelay wait, default 1.0 s)
   → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[18] − 40 → °C
   → queryingToyota2103  ATSH7E0 + 2103  STFT/LTFT:  payload[4/5], (raw×200/256)−100 → %
   → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C
@@ -40,7 +42,9 @@ Before sending each command, every `begin*Query()` sends `ATCEA` (disable CAN ex
 
 ## Two Parsing Strategies
 
-**`completePayloadTokens(from:)`** — Stateful, multi-frame aware. Accumulates ISO-TP first frames (`0x10–0x1F`) and consecutive frames (`0x20–0x2F`) into `multiFramePayload`, returns the complete payload only once `multiFramePayload.count >= expectedLength`, or `nil` while still accumulating. Used for 2101, 2103, 2151, 2123.
+Both live on the `OBDParser` struct in `OBDParser.swift`; the ViewModel calls them through its `parser` instance.
+
+**`completePayloadTokens(from:)`** — Stateful (`mutating`), multi-frame aware. Accumulates ISO-TP first frames (`0x10–0x1F`) and consecutive frames (`0x20–0x2F`) into `multiFramePayload`, returns the complete payload only once `multiFramePayload.count >= expectedLength`, or `nil` while still accumulating. Used for 2101, 2103, 2151, 2123.
 
 **`responsePayloadTokens(from:)`** — Stateless single-frame stripper. Drops the optional CAN ID, extended address byte, and length/first-frame bytes, then returns remaining tokens. Used for 2182 (ATF) which is a known single-frame response.
 
@@ -51,16 +55,17 @@ Both functions strip the CAN response ID (e.g. `7E8`) if present, and the extend
 1. Add constants for the header command and OBD command string.
 2. Add a `queryingFoo` case to `QueryState`.
 3. Add a `beginFooQuery()` that cancels the timeout, resets the multi-frame buffer, sets state, and sends `ATCEA → header → command` with 150 ms delays.
-4. Add a `parseFooLine(_ line: String)` using `completePayloadTokens` (multi-frame) or `responsePayloadTokens` (single-frame). Check `payload.first == "7F"` for NRC. On success, update the published property and call the next `begin*Query()`.
+4. Add a `parseFooLine(_ line: String)` using `parser.completePayloadTokens` (multi-frame) or `parser.responsePayloadTokens` (single-frame). Check `payload.first == "7F"` for NRC. On success, update the published property and call the next `begin*Query()`. (`beginFooQuery()` should call `parser.reset()` when it resets the multi-frame buffer.)
 5. Add a `handleNonFrameFooLine` that calls the next step on terminal errors.
 6. Wire the new case into `route()` and `armActiveTimeout()`.
 7. Chain it into the polling cycle by changing the preceding step's success/NRC/error calls to `beginFooQuery()`.
 
 ## Polling Rate
 
-`scheduleNextActiveQuery()` in `OBDViewModel.swift`:
+`scheduleNextActiveQuery()` in `OBDViewModel.swift` reads the user-configurable `pollingDelay` setting (set in `SettingsView`), defaulting to 1.0 s:
 ```swift
-let delay = Double.random(in: 4...6)  // seconds between cycles
+let stored = UserDefaults.standard.double(forKey: "pollingDelay")
+let delay = stored > 0 ? stored : 1.0   // seconds between cycles
 ```
 
 ## Preview
