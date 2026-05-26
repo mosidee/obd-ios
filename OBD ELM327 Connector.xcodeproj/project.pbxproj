@@ -6,8 +6,19 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		B878D5702FC57B7C00942D57 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B8468A812FC35A1A0012FEFD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B8468A882FC35A1A0012FEFD;
+			remoteInfo = "OBD ELM327 Connector";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		B8468A892FC35A1A0012FEFD /* OBD ELM327 Connector.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OBD ELM327 Connector.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B878D56C2FC57B7C00942D57 /* OBD ELM327 ConnectorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "OBD ELM327 ConnectorTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -29,10 +40,22 @@
 			path = "OBD ELM327 Connector";
 			sourceTree = "<group>";
 		};
+		B878D56D2FC57B7C00942D57 /* OBD ELM327 ConnectorTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "OBD ELM327 ConnectorTests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		B8468A862FC35A1A0012FEFD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B878D5692FC57B7C00942D57 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -46,6 +69,7 @@
 			isa = PBXGroup;
 			children = (
 				B8468A8B2FC35A1A0012FEFD /* OBD ELM327 Connector */,
+				B878D56D2FC57B7C00942D57 /* OBD ELM327 ConnectorTests */,
 				B8468A8A2FC35A1A0012FEFD /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +78,7 @@
 			isa = PBXGroup;
 			children = (
 				B8468A892FC35A1A0012FEFD /* OBD ELM327 Connector.app */,
+				B878D56C2FC57B7C00942D57 /* OBD ELM327 ConnectorTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -83,6 +108,29 @@
 			productReference = B8468A892FC35A1A0012FEFD /* OBD ELM327 Connector.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B878D56B2FC57B7C00942D57 /* OBD ELM327 ConnectorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B878D5722FC57B7C00942D57 /* Build configuration list for PBXNativeTarget "OBD ELM327 ConnectorTests" */;
+			buildPhases = (
+				B878D5682FC57B7C00942D57 /* Sources */,
+				B878D5692FC57B7C00942D57 /* Frameworks */,
+				B878D56A2FC57B7C00942D57 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B878D5712FC57B7C00942D57 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B878D56D2FC57B7C00942D57 /* OBD ELM327 ConnectorTests */,
+			);
+			name = "OBD ELM327 ConnectorTests";
+			packageProductDependencies = (
+			);
+			productName = "OBD ELM327 ConnectorTests";
+			productReference = B878D56C2FC57B7C00942D57 /* OBD ELM327 ConnectorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -95,6 +143,10 @@
 				TargetAttributes = {
 					B8468A882FC35A1A0012FEFD = {
 						CreatedOnToolsVersion = 26.5;
+					};
+					B878D56B2FC57B7C00942D57 = {
+						CreatedOnToolsVersion = 26.5;
+						TestTargetID = B8468A882FC35A1A0012FEFD;
 					};
 				};
 			};
@@ -113,12 +165,20 @@
 			projectRoot = "";
 			targets = (
 				B8468A882FC35A1A0012FEFD /* OBD ELM327 Connector */,
+				B878D56B2FC57B7C00942D57 /* OBD ELM327 ConnectorTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		B8468A872FC35A1A0012FEFD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B878D56A2FC57B7C00942D57 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -135,7 +195,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B878D5682FC57B7C00942D57 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B878D5712FC57B7C00942D57 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B8468A882FC35A1A0012FEFD /* OBD ELM327 Connector */;
+			targetProxy = B878D5702FC57B7C00942D57 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		B8468A9D2FC35A1B0012FEFD /* Debug */ = {
@@ -321,6 +396,48 @@
 			};
 			name = Release;
 		};
+		B878D5732FC57B7C00942D57 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2AS5NH72HJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "mosidee.OBD-ELM327-ConnectorTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OBD ELM327 Connector.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/OBD ELM327 Connector";
+			};
+			name = Debug;
+		};
+		B878D5742FC57B7C00942D57 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2AS5NH72HJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "mosidee.OBD-ELM327-ConnectorTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/OBD ELM327 Connector.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/OBD ELM327 Connector";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -338,6 +455,15 @@
 			buildConfigurations = (
 				B8468A9D2FC35A1B0012FEFD /* Debug */,
 				B8468A9E2FC35A1B0012FEFD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B878D5722FC57B7C00942D57 /* Build configuration list for PBXNativeTarget "OBD ELM327 ConnectorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B878D5732FC57B7C00942D57 /* Debug */,
+				B878D5742FC57B7C00942D57 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

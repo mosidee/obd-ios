@@ -74,8 +74,7 @@ final class OBDViewModel: ObservableObject {
 
     private var queryState: QueryState = .passive
     private var isInitializing = false
-    private var multiFramePayload: [String] = []
-    private var multiFrameExpectedLength: Int?
+    private var parser = OBDParser()
 
     private let loggingEnabled = false   // set true to re-enable TX/RX log
     private let maxLogEntries = 120
@@ -281,7 +280,7 @@ final class OBDViewModel: ObservableObject {
     /// Coolant temp byte is at payload[18] (empirically verified on this ECU).
     /// Formula: coolant temp (°C) = payload[18] − 40.
     private func parseToyota2101Line(_ line: String) {
-        guard let payload = completePayloadTokens(from: line) else { return }
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
             beginToyota2103Query()
@@ -303,7 +302,7 @@ final class OBDViewModel: ObservableObject {
     /// Parses Toyota enhanced packet 2103 from ECU 7E8.
     /// The log shows STFT/LTFT after two status bytes: `61 03 02 00 7F 8D ...`.
     private func parseToyota2103Line(_ line: String) {
-        guard let payload = completePayloadTokens(from: line) else { return }
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
             beginEngineOilQuery()
@@ -322,107 +321,6 @@ final class OBDViewModel: ObservableObject {
         }
 
         handleNonFrameToyota2103Line(line)
-    }
-
-    private func completePayloadTokens(from line: String) -> [String]? {
-        var tokens = line.components(separatedBy: " ")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
-            .filter { !$0.isEmpty }
-
-        guard !tokens.isEmpty else { return [] }
-
-        if let first = tokens.first,
-           first.count >= 3,
-           UInt32(first, radix: 16) != nil {
-            tokens.removeFirst()
-        }
-
-        if tokens.count >= 2,
-           tokens[0] == transmissionExtendedAddress,
-           UInt8(tokens[1], radix: 16) != nil {
-            tokens.removeFirst()
-        }
-
-        guard !tokens.isEmpty else { return [] }
-
-        if tokens.count >= 2,
-           let frameType = UInt8(tokens[0], radix: 16),
-           (0x10...0x1F).contains(frameType),
-           let expectedLength = UInt8(tokens[1], radix: 16) {
-            multiFrameExpectedLength = Int(expectedLength)
-            multiFramePayload = Array(tokens.dropFirst(2))
-            return completedMultiFramePayloadIfReady()
-        }
-
-        if tokens.count >= 2,
-           let frameType = UInt8(tokens[0], radix: 16),
-           (0x20...0x2F).contains(frameType) {
-            multiFramePayload.append(contentsOf: tokens.dropFirst())
-            return completedMultiFramePayloadIfReady()
-        }
-
-        resetMultiFrameBuffer()
-
-        if tokens.count >= 2,
-           let length = UInt8(tokens[0], radix: 16), length <= 0x0F,
-           Int(length) <= tokens.count - 1 {
-            return Array(tokens.dropFirst().prefix(Int(length)))
-        }
-
-        return tokens
-    }
-
-    private func completedMultiFramePayloadIfReady() -> [String]? {
-        guard let expectedLength = multiFrameExpectedLength else { return multiFramePayload }
-        guard multiFramePayload.count >= expectedLength else { return nil }
-        let payload = Array(multiFramePayload.prefix(expectedLength))
-        resetMultiFrameBuffer()
-        return payload
-    }
-
-    private func resetMultiFrameBuffer() {
-        multiFramePayload.removeAll()
-        multiFrameExpectedLength = nil
-    }
-
-    private func responsePayloadTokens(from line: String) -> [String] {
-        var tokens = line.components(separatedBy: " ")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
-            .filter { !$0.isEmpty }
-
-        guard !tokens.isEmpty else { return [] }
-
-        // Drop an optional CAN response ID such as 7E8, 7E9, or 18DAF110.
-        if let first = tokens.first,
-           first.count >= 3,
-           UInt32(first, radix: 16) != nil {
-            tokens.removeFirst()
-        }
-
-        // Drop an optional CAN extended address byte, e.g. 18 05 62 DA 12 7B.
-        if tokens.count >= 2,
-           tokens[0] == transmissionExtendedAddress,
-           UInt8(tokens[1], radix: 16) != nil {
-            tokens.removeFirst()
-        }
-
-        // Drop an optional ISO-TP single-frame length byte, e.g. 03 41 05 7B.
-        if tokens.count >= 2,
-           let length = UInt8(tokens[0], radix: 16), length <= 0x0F,
-           ["41", "61", "62", "7F"].contains(tokens[1]) {
-            tokens.removeFirst()
-        }
-
-        // Drop optional ISO-TP first-frame bytes, e.g. 10 08 62 DA 12 7B ...
-        if tokens.count >= 3,
-           let frameType = UInt8(tokens[0], radix: 16),
-           (0x10...0x1F).contains(frameType),
-           UInt8(tokens[1], radix: 16) != nil,
-           ["41", "61", "62", "7F"].contains(tokens[2]) {
-            tokens.removeFirst(2)
-        }
-
-        return tokens
     }
 
     private func handleNonFrameToyota2101Line(_ line: String) {
@@ -445,7 +343,7 @@ final class OBDViewModel: ObservableObject {
     /// TOYOTA_EOT at bix 72 = data byte 9 after "61 51" = payload[11].
     /// Formula: engine oil temp (°C) = payload[11] − 40.
     private func parseEngineOilLine(_ line: String) {
-        guard let payload = completePayloadTokens(from: line) else { return }
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
             beginATFQuery()
@@ -471,28 +369,14 @@ final class OBDViewModel: ObservableObject {
         if isTerminal { beginATFQuery() }
     }
 
-    private func rawByte(after sequence: [String], in payload: [String]) -> UInt8? {
-        guard payload.count > sequence.count else { return nil }
-
-        for startIndex in payload.indices {
-            let endIndex = startIndex + sequence.count
-            guard endIndex < payload.count else { continue }
-            if Array(payload[startIndex..<endIndex]) == sequence {
-                return UInt8(payload[endIndex], radix: 16)
-            }
-        }
-
-        return nil
-    }
-
     // MARK: - Active Parser — ATF Temperature
 
     /// Parses Toyota mode-21 PID 82 from engine ECU 7E0 (7E8 responds).
     /// Response: 7E8 03 61 82 XX — ATF temp (°C) = XX − 40.
     private func parseATFLine(_ line: String) {
-        let payload = responsePayloadTokens(from: line)
+        let payload = parser.responsePayloadTokens(from: line)
 
-        if let raw = rawByte(after: ["61", "82"], in: payload) {
+        if let raw = OBDParser.rawByte(after: ["61", "82"], in: payload) {
             atfTemp = Double(raw) - 40.0
             lastUpdate = Date()
             beginCoolantV2Query()
@@ -520,7 +404,7 @@ final class OBDViewModel: ObservableObject {
     /// Response: 7C8 03 61 23 XX — both TOYOTA_ECT_7C0 and TOYOTA_COOLANT_T read payload[2].
     /// Formula: °C = raw × 0.5.
     private func parseCoolantV2Line(_ line: String) {
-        guard let payload = completePayloadTokens(from: line) else { return }
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
             returnToPassive()
@@ -550,7 +434,7 @@ final class OBDViewModel: ObservableObject {
 
     private func beginCoolantV2Query() {
         atfTimeoutTask?.cancel()
-        resetMultiFrameBuffer()
+        parser.reset()
         queryState = .queryingCoolantV2
         connectionStatus = "Querying Coolant Temp (V2)..."
         Task { @MainActor [weak self] in
@@ -567,7 +451,7 @@ final class OBDViewModel: ObservableObject {
 
     private func beginToyota2101Query() {
         atfTimeoutTask?.cancel()
-        resetMultiFrameBuffer()
+        parser.reset()
         queryState = .queryingToyota2101
         connectionStatus = "Querying Toyota Engine Data..."
         sendEngineRequest(toyotaEngineDataCommand)
@@ -575,7 +459,7 @@ final class OBDViewModel: ObservableObject {
 
     private func beginToyota2103Query() {
         atfTimeoutTask?.cancel()
-        resetMultiFrameBuffer()
+        parser.reset()
         queryState = .queryingToyota2103
         connectionStatus = "Querying Toyota Fuel Trims..."
         sendEngineRequest(toyotaFuelTrimCommand)
@@ -596,7 +480,7 @@ final class OBDViewModel: ObservableObject {
 
     private func beginEngineOilQuery() {
         atfTimeoutTask?.cancel()
-        resetMultiFrameBuffer()
+        parser.reset()
         queryState = .queryingEngineOil
         connectionStatus = "Querying Engine Oil Temp..."
         Task { @MainActor [weak self] in
