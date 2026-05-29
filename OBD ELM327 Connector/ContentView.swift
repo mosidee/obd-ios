@@ -218,6 +218,8 @@ struct ContentView: View {
                 engineCell(label: "RPM", value: viewModel.engineSpeed, format: "%.0f", unit: "")
                 Divider().frame(height: 60)
                 engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
+                Divider().frame(height: 60)
+                engineCell(label: "Pedal", value: viewModel.accelPedal, format: "%.1f", unit: "%")
             }
         }
         .padding()
@@ -439,6 +441,7 @@ struct SettingsView: View {
     @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
     @AppStorage("loggingEnabled")  private var loggingEnabled: Bool = false
     @AppStorage("listenOnlyMode")  private var listenOnlyMode: Bool = false
+    @AppStorage("standardPIDMode") private var standardPIDMode: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -446,10 +449,11 @@ struct SettingsView: View {
             Form {
                 Section {
                     Toggle("Listen-Only (passive monitor)", isOn: $listenOnlyMode)
+                    Toggle("Standard OBD-II PIDs", isOn: $standardPIDMode)
                 } header: {
                     Text("Mode")
                 } footer: {
-                    Text("Applies on next connect. Passively sniffs the bus instead of requesting data — values update only while another tool is actively polling these PIDs.")
+                    Text("Listen-Only (applies on next connect): passively sniffs the bus instead of requesting data. Standard OBD-II PIDs: reads coolant, RPM, throttle, and fuel trims from generic Mode-01 PIDs instead of Toyota enhanced packets — engine oil, ATF, and the 7C0 coolant always stay enhanced.")
                 }
 
                 Section("Polling") {

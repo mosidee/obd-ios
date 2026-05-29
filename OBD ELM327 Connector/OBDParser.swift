@@ -111,6 +111,25 @@ struct OBDParser {
         return tokens
     }
 
+    /// Walks a standard Mode-01 response payload (which begins with `41`) into a
+    /// pid → data-byte map. `lengths` gives the data-byte count for each expected PID.
+    /// Stops at the first PID not in `lengths` or if the payload is truncated, so an
+    /// unknown/unsupported trailing PID can't corrupt the values parsed before it.
+    static func mode01Values(from payload: [String], lengths: [String: Int]) -> [String: [UInt8]] {
+        guard payload.first == "41" else { return [:] }
+        var result: [String: [UInt8]] = [:]
+        var i = 1
+        while i < payload.count {
+            let pid = payload[i]
+            guard let len = lengths[pid], i + len < payload.count else { break }
+            let bytes = (1...len).compactMap { UInt8(payload[i + $0], radix: 16) }
+            guard bytes.count == len else { break }
+            result[pid] = bytes
+            i += 1 + len
+        }
+        return result
+    }
+
     /// Returns the byte immediately following `sequence` within `payload`, or `nil` if not found.
     static func rawByte(after sequence: [String], in payload: [String]) -> UInt8? {
         guard payload.count > sequence.count else { return nil }

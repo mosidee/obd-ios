@@ -17,7 +17,7 @@ Four files carry all the logic:
 
 **`OBDBluetoothManager.swift`** — Pure BLE transport. Scans for ELM327 adapters (service UUIDs FFF0/18F0/FFE0), manages CoreBluetooth lifecycle, and exposes a single `AsyncStream<String>` of complete ELM327 lines split on `\r`. Contains zero OBD logic. `CBCentralManager` is only created when `startScanning()` is called (not at init), which keeps preview-safe.
 
-**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle (interval from the `pollingDelay` setting, default 1.0 s). Lines from `OBDBluetoothManager.lines` are routed based on `QueryState` and decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempV2`, `engineSpeed`, `throttlePosition`.
+**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle (interval from the `pollingDelay` setting, default 1.0 s). Lines from `OBDBluetoothManager.lines` are routed based on `QueryState` and decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempV2`, `engineSpeed`, `throttlePosition`, `accelPedal`.
 
 **`OBDParser.swift`** — Frame decoding, extracted from `OBDViewModel` so it's unit-testable without `@MainActor`/Bluetooth. A `struct` holding the multi-frame accumulation state; exposes `completePayloadTokens(from:)` (mutating, multi-frame), `responsePayloadTokens(from:)` (stateless, single-frame), `reset()`, and the static `rawByte(after:in:)`. Contains zero CoreBluetooth or UI code.
 
@@ -46,6 +46,10 @@ Before sending each command, every `begin*Query()` sends `ATCEA` (disable CAN ex
 ## Listen-Only Mode
 
 Gated by the `listenOnlyMode` setting (read in `runELM327Init()`, so it applies on connect). When on, `beginListenOnly()` sends `ATCAF0` (CAN auto-formatting off, so raw `10/21/22` ISO-TP frames reach `OBDParser`), `ATCM7DF` + `ATCF7C8` (CAN mask/filter accepting only 7C8 and 7E8 — required because the single shared multi-frame accumulator is reset by any non-ISO-TP frame, so interleaving noise would break 2101/2151 assembly), then `ATMA` (Monitor All) and sends no OBD requests. The `.listening` state routes every monitored line through `parseListeningLine()`, which reuses `parser.completePayloadTokens` and dispatches by the response PID byte (`payload[1]`: `01`→coolant, `03`→fuel trims, `51`→engine oil, `82`→ATF, `23`→coolant V2) using the same formulas as active polling. It's a passive co-monitor: because these are request/response PIDs, values update only while another active tester is polling them on the bus.
+
+## Standard OBD-II Mode (standardPIDMode)
+
+Gated by the `standardPIDMode` setting (read live in `triggerActiveQuery()`, so it applies on the next cycle — no reconnect). When on, the active cycle replaces the enhanced `2101`/`2103` packets with one generic SAE J1979 Mode-01 multi-PID request: `beginStandardQuery()` sends `01 05 0C 11 06 07 49` (coolant `05`→A−40, RPM `0C`→(256A+B)/4, throttle `11`→A×100/255, STFT/LTFT `06`/`07`→A×100/128−100, accel pedal `49`→A×100/255), decoded by `parseStandardLine` via the static `OBDParser.mode01Values(from:lengths:)` walker. It then chains into the **enhanced** engine-oil query (`2151`) → ATF (`2182`) → 7C0 coolant (`2123`); engine oil, ATF, and the 7C0 coolant always stay enhanced regardless of this setting. When off, the full enhanced `2101`/`2103`/`2151` chain runs as before. (Note: the `2101` enhanced layout is Sienta-specific — coolant `payload[18]`, RPM `payload[11..12]`÷4 — not OBDb's generic map.)
 
 ## Two Parsing Strategies
 

@@ -25,6 +25,7 @@ private enum QueryState {
     case queryingCoolantV2 // 7C0/2123 coolant V2 command sent; awaiting ECU response
     case restoringHeader   // Restoring normal functional request header before next cycle
     case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
+    case queryingStandard    // Standard mode: multi-PID Mode-01 request (coolant/RPM/throttle/trims)
 }
 
 enum OBDLogDirection: String {
@@ -52,6 +53,7 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var coolantTempV2: Double?    // TOYOTA_COOLANT_T from 7C0/2123
     @Published private(set) var engineSpeed: Double?      // RPM, 2101 payload[11..12] ÷4
     @Published private(set) var throttlePosition: Double? // %, 2101 payload[17] (unconfirmed)
+    @Published private(set) var accelPedal: Double?       // %, standard PID 49 (accel pedal pos D)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -89,6 +91,10 @@ final class OBDViewModel: ObservableObject {
     private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
     private let coolantV2HeaderCommand = "ATSH7C0" // Toyota coolant ECU (V2 definition)
     private let coolantV2Command     = "2123"     // Toyota mode 21, PID 23 — ECU 7C0, response from 7C8
+
+    // Standard OBD-II Mode 01 (used when the standardPIDMode setting is on)
+    private let standardBatchCommand = "01 05 0C 11 06 07 49" // coolant, RPM, throttle, STFT, LTFT, accel pedal
+    private let standardBatchLengths: [String: Int] = ["05": 1, "0C": 2, "11": 1, "06": 1, "07": 1, "49": 1]
 
     // MARK: - Init
 
@@ -234,6 +240,9 @@ final class OBDViewModel: ObservableObject {
 
         case .queryingCoolantV2:
             parseCoolantV2Line(line)
+
+        case .queryingStandard:
+            parseStandardLine(line)
 
         case .restoringHeader:
             if line == ">" || line.hasSuffix(">") {
@@ -590,6 +599,60 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Standard OBD-II Mode 01 (standardPIDMode)
+
+    /// Sends a single multi-PID Mode-01 request to the engine ECU for coolant, RPM,
+    /// throttle, and fuel trims; the response is decoded by `parseStandardLine`.
+    private func beginStandardQuery() {
+        activeQueryTimeoutTask?.cancel()
+        parser.reset()
+        queryState = .queryingStandard
+        connectionStatus = "Querying Standard PIDs..."
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendCommand(self.disableExtendedAddressCommand)
+            try? await Task.sleep(for: .milliseconds(150))
+            self.sendCommand(self.engineHeaderCommand)
+            try? await Task.sleep(for: .milliseconds(150))
+            guard self.queryState == .queryingStandard else { return }
+            self.sendCommand(self.standardBatchCommand)
+            self.armActiveTimeout()
+        }
+    }
+
+    /// Decodes the multi-PID Mode-01 response (`41 05 .. 0C .. .. 11 .. 06 .. 07 ..`).
+    /// Chains to the enhanced engine-oil query (2151); oil, ATF, and 7C0 stay enhanced.
+    private func parseStandardLine(_ line: String) {
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
+
+        if payload.first == "7F" {
+            beginEngineOilQuery()
+            return
+        }
+
+        if payload.first == "41" {
+            let values = OBDParser.mode01Values(from: payload, lengths: standardBatchLengths)
+            if let v = values["05"] { coolantTemp = Double(v[0]) - 40.0 }
+            if let v = values["0C"] { engineSpeed = (Double(v[0]) * 256.0 + Double(v[1])) / 4.0 }
+            if let v = values["11"] { throttlePosition = Double(v[0]) * 100.0 / 255.0 }
+            if let v = values["06"] { stft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
+            if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
+            if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
+            lastUpdate = Date()
+            beginEngineOilQuery()
+            return
+        }
+
+        handleNonFrameStandardLine(line)
+    }
+
+    private func handleNonFrameStandardLine(_ line: String) {
+        let isTerminal = line.contains("NO DATA")
+                      || line.contains("ERROR")
+                      || line.contains("UNABLE TO CONNECT")
+        if isTerminal { beginEngineOilQuery() }
+    }
+
     // MARK: - Active Query Scheduling
 
     private func scheduleNextActiveQuery() {
@@ -609,7 +672,11 @@ final class OBDViewModel: ObservableObject {
             scheduleNextActiveQuery()  // Back off and retry later
             return
         }
-        beginToyota2101Query()
+        if UserDefaults.standard.bool(forKey: "standardPIDMode") {
+            beginStandardQuery()       // Standard Mode-01 PIDs
+        } else {
+            beginToyota2101Query()     // Toyota enhanced packets
+        }
     }
 
     // MARK: - Communication Log
@@ -685,6 +752,7 @@ final class OBDViewModel: ObservableObject {
         vm.atfTemp       = 72.0
         vm.engineSpeed       = 736.0
         vm.throttlePosition  = 14.5
+        vm.accelPedal        = 12.0
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()
@@ -710,6 +778,8 @@ final class OBDViewModel: ObservableObject {
                 self.beginCoolantV2Query()
             case .queryingCoolantV2:
                 self.returnToPassive()
+            case .queryingStandard:
+                self.beginEngineOilQuery()
             case .passive, .restoringHeader, .listening:
                 break
             }

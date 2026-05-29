@@ -116,6 +116,33 @@ struct ResponsePayloadTokensTests {
     }
 }
 
+// MARK: - mode01Values
+
+@Suite("mode01Values")
+struct Mode01ValuesTests {
+
+    @Test func walksMultiPidResponse() {
+        // 41 05 5C  0C 0B 7F  11 2B → coolant 0x5C, rpm 0x0B7F, throttle 0x2B
+        let payload = ["41", "05", "5C", "0C", "0B", "7F", "11", "2B"]
+        let v = OBDParser.mode01Values(from: payload, lengths: ["05": 1, "0C": 2, "11": 1])
+        #expect(v["05"] == [0x5C])
+        #expect(v["0C"] == [0x0B, 0x7F])
+        #expect(v["11"] == [0x2B])
+    }
+
+    @Test func stopsAtUnknownPid() {
+        // Trailing unsupported PID 0x99 must not corrupt the values parsed before it.
+        let v = OBDParser.mode01Values(from: ["41", "05", "5C", "99", "00"], lengths: ["05": 1])
+        #expect(v["05"] == [0x5C])
+        #expect(v["99"] == nil)
+    }
+
+    @Test func ignoresNonMode01Payload() {
+        // An enhanced 61-response is not a Mode-01 reply.
+        #expect(OBDParser.mode01Values(from: ["61", "01", "00"], lengths: ["05": 1]).isEmpty)
+    }
+}
+
 // MARK: - rawByte(after:in:)
 
 @Suite("rawByte")
