@@ -24,6 +24,7 @@ private enum QueryState {
     case queryingATF       // ATF command sent; awaiting ECU response
     case queryingCoolantV2 // 7C0/2123 coolant V2 command sent; awaiting ECU response
     case restoringHeader   // Restoring normal functional request header before next cycle
+    case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
 }
 
 enum OBDLogDirection: String {
@@ -182,9 +183,13 @@ final class OBDViewModel: ObservableObject {
 
         isInitializing = false
         isConnected = true
-        connectionStatus = "Active Polling"
 
-        scheduleNextActiveQuery()       // Begin the active query cycle
+        if UserDefaults.standard.bool(forKey: "listenOnlyMode") {
+            beginListenOnly()           // Passive monitor instead of active polling
+        } else {
+            connectionStatus = "Active Polling"
+            scheduleNextActiveQuery()   // Begin the active query cycle
+        }
     }
 
     // MARK: - Single Line Consumer
@@ -232,6 +237,9 @@ final class OBDViewModel: ObservableObject {
             if line == ">" || line.hasSuffix(">") {
                 startPassiveMonitoring()
             }
+
+        case .listening:
+            parseListeningLine(line)
         }
     }
 
@@ -495,6 +503,75 @@ final class OBDViewModel: ObservableObject {
         scheduleNextActiveQuery()
     }
 
+    // MARK: - Listen-Only Mode (passive CAN-bus monitor)
+
+    /// Enters passive monitor mode: disables CAN auto-formatting so raw ISO-TP frames
+    /// (10/21/22…) reach OBDParser, filters to just the two source ECUs, then starts ATMA.
+    /// Sends no OBD requests — values update only while another tester is actively polling
+    /// these PIDs on the bus.
+    ///
+    /// The CM/CF filter is correctness, not bandwidth: OBDParser holds one shared multi-frame
+    /// accumulator, and any non-ISO-TP frame resets it. Restricting delivery to 7E8/7C8 keeps
+    /// interleaving noise off the bus so the multi-frame coolant (2101) and oil (2151)
+    /// sequences can complete. Mask 0x7DF / filter 0x7C8 accepts exactly 7C8 and 7E8.
+    private func beginListenOnly() {
+        pollTimerTask?.cancel()
+        activeQueryTimeoutTask?.cancel()
+        parser.reset()
+        queryState = .listening
+        connectionStatus = "Listen-Only (monitoring)"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendCommand("ATCAF0")   // CAN auto-formatting off — expose raw frames
+            try? await Task.sleep(for: .milliseconds(150))
+            self.sendCommand("ATCM7DF")  // CAN mask: bit 0x020 = don't-care
+            try? await Task.sleep(for: .milliseconds(150))
+            self.sendCommand("ATCF7C8")  // CAN filter: accept only 7C8 and 7E8
+            try? await Task.sleep(for: .milliseconds(150))
+            guard self.queryState == .listening else { return }
+            self.sendCommand("ATMA")     // Monitor All (subject to the CM/CF filter)
+        }
+    }
+
+    /// Routes a monitored frame to the matching value by its response PID byte.
+    /// Reuses the same multi-frame assembler and decode formulas as active polling.
+    private func parseListeningLine(_ line: String) {
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
+        guard payload.first == "61", payload.count >= 2 else { return }
+
+        switch payload[1] {
+        case "01" where payload.count > 18:
+            if let raw = UInt8(payload[18], radix: 16) {
+                coolantTemp = Double(raw) - 40.0
+                lastUpdate = Date()
+            }
+        case "03" where payload.count > 5:
+            if let rawSTFT = UInt8(payload[4], radix: 16),
+               let rawLTFT = UInt8(payload[5], radix: 16) {
+                stft = (Double(rawSTFT) * 200.0 / 256.0) - 100.0
+                ltft = (Double(rawLTFT) * 200.0 / 256.0) - 100.0
+                lastUpdate = Date()
+            }
+        case "51" where payload.count > 11:
+            if let raw = UInt8(payload[11], radix: 16) {
+                engineOilTemp = Double(raw) - 40.0
+                lastUpdate = Date()
+            }
+        case "82" where payload.count > 2:
+            if let raw = UInt8(payload[2], radix: 16) {
+                atfTemp = Double(raw) - 40.0
+                lastUpdate = Date()
+            }
+        case "23" where payload.count > 2:
+            if let raw = UInt8(payload[2], radix: 16) {
+                coolantTempV2 = Double(raw) * 0.5
+                lastUpdate = Date()
+            }
+        default:
+            break
+        }
+    }
+
     // MARK: - Active Query Scheduling
 
     private func scheduleNextActiveQuery() {
@@ -613,7 +690,7 @@ final class OBDViewModel: ObservableObject {
                 self.beginCoolantV2Query()
             case .queryingCoolantV2:
                 self.returnToPassive()
-            case .passive, .restoringHeader:
+            case .passive, .restoringHeader, .listening:
                 break
             }
         }

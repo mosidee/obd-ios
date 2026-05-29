@@ -340,7 +340,8 @@ struct ContentView: View {
 
     private var statusDotColor: Color {
         let s = viewModel.connectionStatus
-        if s.contains("Polling") || s.contains("Connected") || s.contains("Restoring") { return .green }
+        if s.contains("Polling") || s.contains("Connected") || s.contains("Restoring")
+            || s.contains("Listen") || s.contains("Monitor") { return .green }
         if s.contains("Querying")   { return .cyan }
         if s.contains("Scanning") || s.contains("Connecting") || s.contains("Initialising") { return .yellow }
         if s.contains("Error") || s.contains("Off") || s.contains("Unauthorized") { return .red }
@@ -397,11 +398,20 @@ struct SettingsView: View {
     @AppStorage("pollingDelay")    private var pollingDelay: Double = 1.0
     @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
     @AppStorage("loggingEnabled")  private var loggingEnabled: Bool = false
+    @AppStorage("listenOnlyMode")  private var listenOnlyMode: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationView {
             Form {
+                Section {
+                    Toggle("Listen-Only (passive monitor)", isOn: $listenOnlyMode)
+                } header: {
+                    Text("Mode")
+                } footer: {
+                    Text("Applies on next connect. Passively sniffs the bus instead of requesting data — values update only while another tool is actively polling these PIDs.")
+                }
+
                 Section("Polling") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {

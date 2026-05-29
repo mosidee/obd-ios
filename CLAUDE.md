@@ -40,6 +40,10 @@ passive (pollingDelay wait, default 1.0 s)
 
 Before sending each command, every `begin*Query()` sends `ATCEA` (disable CAN extended addressing) then the target header, with 150 ms delays between. A 5-second watchdog (`armActiveTimeout`) auto-advances if no response arrives.
 
+## Listen-Only Mode
+
+Gated by the `listenOnlyMode` setting (read in `runELM327Init()`, so it applies on connect). When on, `beginListenOnly()` sends `ATCAF0` (CAN auto-formatting off, so raw `10/21/22` ISO-TP frames reach `OBDParser`), `ATCM7DF` + `ATCF7C8` (CAN mask/filter accepting only 7C8 and 7E8 — required because the single shared multi-frame accumulator is reset by any non-ISO-TP frame, so interleaving noise would break 2101/2151 assembly), then `ATMA` (Monitor All) and sends no OBD requests. The `.listening` state routes every monitored line through `parseListeningLine()`, which reuses `parser.completePayloadTokens` and dispatches by the response PID byte (`payload[1]`: `01`→coolant, `03`→fuel trims, `51`→engine oil, `82`→ATF, `23`→coolant V2) using the same formulas as active polling. It's a passive co-monitor: because these are request/response PIDs, values update only while another active tester is polling them on the bus.
+
 ## Two Parsing Strategies
 
 Both live on the `OBDParser` struct in `OBDParser.swift`; the ViewModel calls them through its `parser` instance.
