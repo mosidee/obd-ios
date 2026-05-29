@@ -4,7 +4,7 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Coolant    : ATSH7E0 + 2101, payload[11] − 40 → °C
+//    Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C  (engine speed payload[11..12] ÷4)
 //    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
@@ -50,9 +50,8 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var engineOilTemp: Double?
     @Published private(set) var atfTemp: Double?
     @Published private(set) var coolantTempV2: Double?    // TOYOTA_COOLANT_T from 7C0/2123
-    @Published private(set) var engineSpeed: Double?      // RPM, 2101 payload[12..13]
-    @Published private(set) var throttlePosition: Double? // %, 2101 payload[17]
-    @Published private(set) var throttleVolt: Double?     // %, 2101 payload[18]
+    @Published private(set) var engineSpeed: Double?      // RPM, 2101 payload[11..12] ÷4
+    @Published private(set) var throttlePosition: Double? // %, 2101 payload[17] (unconfirmed)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -273,19 +272,19 @@ final class OBDViewModel: ObservableObject {
     /// the 2101 layout is pending on-device confirmation for this ECU.
     private func decodeToyota2101(_ payload: [String]) {
         guard payload.count > 11, payload[0] == "61", payload[1] == "01" else { return }
-        if let raw = UInt8(payload[11], radix: 16) {
-            coolantTemp = Double(raw) - 40.0
+        // Engine speed: standard PID-0C formula (A·256 + B) / 4 → rpm, A=payload[11], B=payload[12].
+        if payload.count > 12,
+           let a = UInt8(payload[11], radix: 16),
+           let b = UInt8(payload[12], radix: 16) {
+            engineSpeed = (Double(a) * 256.0 + Double(b)) / 4.0
         }
-        if payload.count > 13,
-           let hi = UInt8(payload[12], radix: 16),
-           let lo = UInt8(payload[13], radix: 16) {
-            engineSpeed = Double(Int(hi) << 8 | Int(lo))
-        }
+        // Throttle position: payload[17], raw ×100/255 → % (offset unconfirmed on this ECU).
         if payload.count > 17, let raw = UInt8(payload[17], radix: 16) {
             throttlePosition = Double(raw) * 100.0 / 255.0
         }
+        // Coolant: payload[18] − 40 → °C (Sienta-specific; OBDb generic [11] does NOT match this ECU).
         if payload.count > 18, let raw = UInt8(payload[18], radix: 16) {
-            throttleVolt = Double(raw) * 100.0 / 255.0
+            coolantTemp = Double(raw) - 40.0
         }
         lastUpdate = Date()
     }
@@ -684,9 +683,8 @@ final class OBDViewModel: ObservableObject {
         vm.coolantTempV2 = 88.0
         vm.engineOilTemp = 95.0
         vm.atfTemp       = 72.0
-        vm.engineSpeed       = 1850.0
+        vm.engineSpeed       = 736.0
         vm.throttlePosition  = 14.5
-        vm.throttleVolt      = 18.2
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()

@@ -17,7 +17,7 @@ Four files carry all the logic:
 
 **`OBDBluetoothManager.swift`** — Pure BLE transport. Scans for ELM327 adapters (service UUIDs FFF0/18F0/FFE0), manages CoreBluetooth lifecycle, and exposes a single `AsyncStream<String>` of complete ELM327 lines split on `\r`. Contains zero OBD logic. `CBCentralManager` is only created when `startScanning()` is called (not at init), which keeps preview-safe.
 
-**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle (interval from the `pollingDelay` setting, default 1.0 s). Lines from `OBDBluetoothManager.lines` are routed based on `QueryState` and decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempV2`, `engineSpeed`, `throttlePosition`, `throttleVolt`.
+**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` state machine that drives an active polling cycle (interval from the `pollingDelay` setting, default 1.0 s). Lines from `OBDBluetoothManager.lines` are routed based on `QueryState` and decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `coolantTempV2`, `engineSpeed`, `throttlePosition`.
 
 **`OBDParser.swift`** — Frame decoding, extracted from `OBDViewModel` so it's unit-testable without `@MainActor`/Bluetooth. A `struct` holding the multi-frame accumulation state; exposes `completePayloadTokens(from:)` (mutating, multi-frame), `responsePayloadTokens(from:)` (stateless, single-frame), `reset()`, and the static `rawByte(after:in:)`. Contains zero CoreBluetooth or UI code.
 
@@ -29,9 +29,10 @@ Each cycle executes in sequence; each parser calls the next `begin*Query()` on s
 
 ```
 passive (pollingDelay wait, default 1.0 s)
-  → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[11] − 40 → °C
-                                          (also: engine speed payload[12..13] rpm,
-                                           throttle pos payload[17], throttle volt payload[18], ×100/255 %)
+  → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[18] − 40 → °C
+                                          (also: engine speed payload[11..12] ÷4 rpm,
+                                           throttle pos payload[17] ×100/255 %; Sienta-specific
+                                           layout, NOT OBDb generic — verified from capture)
   → queryingToyota2103  ATSH7E0 + 2103  STFT/LTFT:  payload[4/5], (raw×200/256)−100 → %
   → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C
   → queryingATF         ATSH7E0 + 2182  ATF:        first byte after [61 82] − 40 → °C

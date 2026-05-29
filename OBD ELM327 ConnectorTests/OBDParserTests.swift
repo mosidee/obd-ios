@@ -54,15 +54,15 @@ struct CompletePayloadTokensTests {
         #expect(payload?[0] == "61" && payload?[1] == "01")
     }
 
-    @Test func multiFrame_coolant2101_coolantByteAtIndex11() {
-        // Verifies that payload[11] carries the coolant raw byte (0x7E = 86°C after −40)
+    @Test func multiFrame_coolant2101_coolantByteAtIndex18() {
+        // Verifies that payload[18] carries the coolant raw byte (0x7E = 86°C after −40)
         var p = OBDParser()
         p.completePayloadTokens(from: "7E8 10 1C 61 01 00 00 00 00")
-        p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 7E 00")   // 0x7E lands at index 11
-        p.completePayloadTokens(from: "7E8 22 00 00 00 00 00 00 00")
+        p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 00 00")
+        p.completePayloadTokens(from: "7E8 22 00 00 00 00 00 7E 00")
         p.completePayloadTokens(from: "7E8 23 00 00 00 00 00 00 00")
         let payload = p.completePayloadTokens(from: "7E8 24 00 00 00 00 00 00 00")!
-        let raw = UInt8(payload[11], radix: 16)!   // 0x7E = 126
+        let raw = UInt8(payload[18], radix: 16)!   // 0x7E = 126
         #expect(Double(raw) - 40.0 == 86.0)
     }
 
@@ -143,7 +143,7 @@ struct RawByteTests {
 struct ValueFormulaTests {
 
     @Test func coolantTemp_rawMinusForty() {
-        // payload[11] formula: raw − 40
+        // payload[18] formula: raw − 40
         let raw: UInt8 = 0x7E   // 126
         #expect(Double(raw) - 40.0 == 86.0)
     }
@@ -185,14 +185,14 @@ struct ValueFormulaTests {
         #expect(abs(pct - (-2.34375)) < 0.0001)
     }
 
-    @Test func engineSpeed_bigEndian16() {
-        // 2101 payload[12..13] = (hi << 8) | lo, rpm. 0x02BC = 700.
-        let hi: UInt8 = 0x02, lo: UInt8 = 0xBC
-        #expect(Double(Int(hi) << 8 | Int(lo)) == 700.0)
+    @Test func engineSpeed_quarterRpm() {
+        // Standard PID-0C formula (A·256 + B) / 4 → rpm. 0x0B 0x7F = 2943 → 735.75 (idle).
+        let a: UInt8 = 0x0B, b: UInt8 = 0x7F
+        #expect((Double(a) * 256.0 + Double(b)) / 4.0 == 735.75)
     }
 
     @Test func throttle_percentScaling() {
-        // 2101 throttle bytes: raw × 100 / 255 → percent.
+        // 2101 throttle byte: raw × 100 / 255 → percent.
         #expect((Double(UInt8(0xFF)) * 100.0 / 255.0) == 100.0)
         #expect(abs((Double(UInt8(0x80)) * 100.0 / 255.0) - 50.196) < 0.01)
     }

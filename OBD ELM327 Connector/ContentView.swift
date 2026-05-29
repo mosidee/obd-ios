@@ -218,8 +218,6 @@ struct ContentView: View {
                 engineCell(label: "RPM", value: viewModel.engineSpeed, format: "%.0f", unit: "")
                 Divider().frame(height: 60)
                 engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
-                Divider().frame(height: 60)
-                engineCell(label: "Throttle V", value: viewModel.throttleVolt, format: "%.1f", unit: "%")
             }
         }
         .padding()
