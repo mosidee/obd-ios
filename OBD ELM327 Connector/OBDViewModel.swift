@@ -72,6 +72,7 @@ final class OBDViewModel: ObservableObject {
 
     private var queryState: QueryState = .passive
     private var isInitializing = false
+    private var listenModeActive = false   // Set at connect; drives the oil/ATF poll → monitor loop
     private var parser = OBDParser()
 
     private let maxLogEntries = 120
@@ -127,6 +128,7 @@ final class OBDViewModel: ObservableObject {
         pollTimerTask?.cancel()
         activeQueryTimeoutTask?.cancel()
         isInitializing = false
+        listenModeActive = false
         queryState = .passive
         bluetooth.disconnect()
         isConnected = false
@@ -182,8 +184,9 @@ final class OBDViewModel: ObservableObject {
         isInitializing = false
         isConnected = true
 
-        if UserDefaults.standard.bool(forKey: "listenOnlyMode") {
-            beginListenOnly()           // Passive monitor instead of active polling
+        listenModeActive = UserDefaults.standard.bool(forKey: "listenOnlyMode")
+        if listenModeActive {
+            beginListenOnly()           // Alternate oil/ATF poll with passive standard-PID monitoring
         } else {
             connectionStatus = "Active Polling"
             scheduleNextActiveQuery()   // Begin the active query cycle
@@ -235,31 +238,6 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Listen-Only Decode — Toyota Enhanced 2101
-
-    /// Extracts coolant, engine speed, and throttle from a 2101 (61 01) payload.
-    /// Used only by listen-only mode, which sniffs the enhanced 61-frames another tester
-    /// emits on the bus. Offsets/formulas per OBDb (TOYOTA_COOLANT_TEMP / _ENGINE_SPEED /
-    /// _THROTTLE_SENSOR_POSITION); the 2101 layout is pending on-device confirmation for this ECU.
-    private func decodeToyota2101(_ payload: [String]) {
-        guard payload.count > 11, payload[0] == "61", payload[1] == "01" else { return }
-        // Engine speed: standard PID-0C formula (A·256 + B) / 4 → rpm, A=payload[11], B=payload[12].
-        if payload.count > 12,
-           let a = UInt8(payload[11], radix: 16),
-           let b = UInt8(payload[12], radix: 16) {
-            engineSpeed = (Double(a) * 256.0 + Double(b)) / 4.0
-        }
-        // Throttle position: payload[17], raw ×100/255 → % (offset unconfirmed on this ECU).
-        if payload.count > 17, let raw = UInt8(payload[17], radix: 16) {
-            throttlePosition = Double(raw) * 100.0 / 255.0
-        }
-        // Coolant: payload[18] − 40 → °C (Sienta-specific; OBDb generic [11] does NOT match this ECU).
-        if payload.count > 18, let raw = UInt8(payload[18], radix: 16) {
-            coolantTemp = Double(raw) - 40.0
-        }
-        lastUpdate = Date()
-    }
-
     // MARK: - Active Parser — Engine Oil Temperature
 
     /// Parses Toyota mode-21 PID 51 from engine ECU 7E0 (7E8 responds) — multi-frame response.
@@ -302,12 +280,12 @@ final class OBDViewModel: ObservableObject {
         if let raw = OBDParser.rawByte(after: ["61", "82"], in: payload) {
             atfTemp = Double(raw) - 40.0
             lastUpdate = Date()
-            returnToPassive()
+            afterATFCycle()
             return
         }
 
         if payload.first == "7F" {
-            returnToPassive()
+            afterATFCycle()
             return
         }
 
@@ -318,7 +296,17 @@ final class OBDViewModel: ObservableObject {
         let isTerminal = line.contains("NO DATA")
                       || line.contains("ERROR")
                       || line.contains("UNABLE TO CONNECT")
-        if isTerminal { returnToPassive() }
+        if isTerminal { afterATFCycle() }
+    }
+
+    /// End of the oil/ATF poll. In listen mode, loop into the passive monitor window;
+    /// otherwise restore the functional header and resume normal active polling.
+    private func afterATFCycle() {
+        if listenModeActive {
+            beginListenWindow()
+        } else {
+            returnToPassive()
+        }
     }
 
     private func beginEngineOilQuery() {
@@ -379,65 +367,90 @@ final class OBDViewModel: ObservableObject {
         scheduleNextActiveQuery()
     }
 
-    // MARK: - Listen-Only Mode (passive CAN-bus monitor)
+    // MARK: - Listen Mode (alternating poll + passive standard-PID monitor)
 
-    /// Enters passive monitor mode: disables CAN auto-formatting so raw ISO-TP frames
-    /// (10/21/22…) reach OBDParser, filters to just the two source ECUs, then starts ATMA.
-    /// Sends no OBD requests — values update only while another tester is actively polling
-    /// these PIDs on the bus.
+    /// Entry point for listen mode. Engine oil and ATF have no standard Mode-01 PID, so they
+    /// can only be obtained by requesting them; the six standard values (coolant/RPM/throttle/
+    /// STFT/LTFT/pedal) are sniffed from another tester's Mode-01 traffic. The ELM327 can't
+    /// monitor and request at the same time, so the mode alternates: poll oil → ATF, then enter
+    /// ATMA for one polling interval, then repeat.
     ///
-    /// The CM/CF filter is correctness, not bandwidth: OBDParser holds one shared multi-frame
-    /// accumulator, and any non-ISO-TP frame resets it. Restricting delivery to 7E8/7C8 keeps
-    /// interleaving noise off the bus so the multi-frame coolant (2101) and oil (2151)
-    /// sequences can complete. Mask 0x7DF / filter 0x7C8 accepts exactly 7C8 and 7E8.
+    /// Sets the CAN mask/filter once (mask 0x7FF / filter 0x7E8 = exactly 7E8, the engine ECU's
+    /// response ID). The filter is correctness for the monitor phase: OBDParser holds one shared
+    /// multi-frame accumulator that any other CAN ID would reset mid-sequence; it's also harmless
+    /// to the poll phase, whose oil/ATF responses also arrive on 7E8.
     private func beginListenOnly() {
         pollTimerTask?.cancel()
         activeQueryTimeoutTask?.cancel()
         parser.reset()
-        queryState = .listening
         connectionStatus = "Listen-Only (monitoring)"
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.sendCommand("ATCAF0")   // CAN auto-formatting off — expose raw frames
+            self.sendCommand("ATCM7FF")  // CAN mask: every bit significant
             try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand("ATCM7DF")  // CAN mask: bit 0x020 = don't-care
+            self.sendCommand("ATCF7E8")  // CAN filter: accept only 7E8 (engine ECU responses)
             try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand("ATCF7C8")  // CAN filter: accept only 7C8 and 7E8
-            try? await Task.sleep(for: .milliseconds(150))
-            guard self.queryState == .listening else { return }
-            self.sendCommand("ATMA")     // Monitor All (subject to the CM/CF filter)
+            guard self.listenModeActive else { return }
+            self.beginEngineOilQuery()   // poll oil → ATF → monitor window → repeat
         }
     }
 
-    /// Routes a monitored frame to the matching value by its response PID byte.
-    /// Reuses the same multi-frame assembler and decode formulas as active polling.
+    /// Passively monitors the bus for one polling interval, capturing standard Mode-01
+    /// responses, then stops and re-polls oil/ATF. ATMA needs CAN auto-formatting off so the
+    /// raw ISO-TP frames reach OBDParser.
+    private func beginListenWindow() {
+        activeQueryTimeoutTask?.cancel()
+        parser.reset()
+        queryState = .listening
+        connectionStatus = "Listen-Only (monitoring)"
+        pollTimerTask?.cancel()
+        pollTimerTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendCommand("ATCAF0")   // CAN auto-formatting off — expose raw frames
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, self.queryState == .listening else { return }
+            self.sendCommand("ATMA")     // Monitor All (subject to the 7E8 filter)
+            let stored = UserDefaults.standard.double(forKey: "pollingDelay")
+            let window = stored > 0 ? stored : 1.0
+            try? await Task.sleep(for: .seconds(window))
+            guard !Task.isCancelled, self.queryState == .listening else { return }
+            self.exitMonitorThenPoll()
+        }
+    }
+
+    /// Stops ATMA, re-enables CAN auto-formatting, then resumes the oil/ATF poll.
+    ///
+    /// NOTE (the one part unverified on this adapter): a leading space stops the monitor — the
+    /// ELM327 discards the triggering byte — while the rest of the same line (`ATCAF1`) restores
+    /// auto-formatting in one shot. A bare carriage return must NOT be used: the ELM327 repeats
+    /// the last command (ATMA) on an empty line. If the Vgate clone doesn't discard that byte,
+    /// CAF stays off, the 2151/2182 requests go out malformed and go unanswered, and the symptom
+    /// is oil/ATF staying blank with ~5 s stutters (the watchdog firing) — which points here.
+    private func exitMonitorThenPoll() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.sendCommand(" ATCAF1")  // space stops ATMA; ATCAF1 restores auto-formatting
+            try? await Task.sleep(for: .milliseconds(200))
+            guard self.listenModeActive else { return }
+            self.beginEngineOilQuery()   // back to polling oil → ATF
+        }
+    }
+
+    /// Routes a monitored standard Mode-01 (`41`) response to the six standard values, using the
+    /// same multi-frame assembler and formulas as active polling. Oil/ATF aren't sniffed here —
+    /// they're actively polled between monitor windows.
     private func parseListeningLine(_ line: String) {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
-        guard payload.first == "61", payload.count >= 2 else { return }
-
-        switch payload[1] {
-        case "01" where payload.count > 11:
-            decodeToyota2101(payload)
-        case "03" where payload.count > 5:
-            if let rawSTFT = UInt8(payload[4], radix: 16),
-               let rawLTFT = UInt8(payload[5], radix: 16) {
-                stft = (Double(rawSTFT) * 200.0 / 256.0) - 100.0
-                ltft = (Double(rawLTFT) * 200.0 / 256.0) - 100.0
-                lastUpdate = Date()
-            }
-        case "51" where payload.count > 11:
-            if let raw = UInt8(payload[11], radix: 16) {
-                engineOilTemp = Double(raw) - 40.0
-                lastUpdate = Date()
-            }
-        case "82" where payload.count > 2:
-            if let raw = UInt8(payload[2], radix: 16) {
-                atfTemp = Double(raw) - 40.0
-                lastUpdate = Date()
-            }
-        default:
-            break
-        }
+        guard payload.first == "41" else { return }
+        let values = OBDParser.mode01Values(from: payload, lengths: standardBatchLengths)
+        guard !values.isEmpty else { return }
+        if let v = values["05"] { coolantTemp = Double(v[0]) - 40.0 }
+        if let v = values["0C"] { engineSpeed = (Double(v[0]) * 256.0 + Double(v[1])) / 4.0 }
+        if let v = values["11"] { throttlePosition = Double(v[0]) * 100.0 / 255.0 }
+        if let v = values["06"] { stft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
+        if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
+        if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
+        lastUpdate = Date()
     }
 
     // MARK: - Active Parser — Standard OBD-II Mode 01
@@ -609,7 +622,7 @@ final class OBDViewModel: ObservableObject {
             case .queryingEngineOil:
                 self.beginATFQuery()
             case .queryingATF:
-                self.returnToPassive()
+                self.afterATFCycle()
             case .passive, .restoringHeader, .listening:
                 break
             }

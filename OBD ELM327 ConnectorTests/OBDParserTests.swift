@@ -213,7 +213,7 @@ struct ValueFormulaTests {
     }
 
     @Test func throttle_percentScaling() {
-        // 2101 throttle byte: raw × 100 / 255 → percent.
+        // Standard PID-11 throttle byte: raw × 100 / 255 → percent.
         #expect((Double(UInt8(0xFF)) * 100.0 / 255.0) == 100.0)
         #expect(abs((Double(UInt8(0x80)) * 100.0 / 255.0) - 50.196) < 0.01)
     }
