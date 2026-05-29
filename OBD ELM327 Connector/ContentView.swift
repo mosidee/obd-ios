@@ -18,6 +18,7 @@ struct ContentView: View {
                     fuelTrimCard
                     oilTempsCard
                     coolantCard
+                    engineCard
                     if loggingEnabled {
                         communicationLogCard
                     }
@@ -202,6 +203,47 @@ struct ContentView: View {
             Text(subtitle)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - Engine Card (from 2101)
+
+    private var engineCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Engine", systemImage: "gauge.open.with.lines.needle.33percent")
+                .font(.headline)
+            HStack(spacing: 0) {
+                engineCell(label: "RPM", value: viewModel.engineSpeed, format: "%.0f", unit: "")
+                Divider().frame(height: 60)
+                engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
+                Divider().frame(height: 60)
+                engineCell(label: "Throttle V", value: viewModel.throttleVolt, format: "%.1f", unit: "%")
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func engineCell(label: String, value: Double?, format: String, unit: String) -> some View {
+        VStack(spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value.map { String(format: format, $0) } ?? "—")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .monospacedDigit()
+                if value != nil, !unit.isEmpty {
+                    Text(unit)
+                        .font(.callout.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)

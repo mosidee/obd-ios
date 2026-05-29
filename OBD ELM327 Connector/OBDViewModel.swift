@@ -50,6 +50,9 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var engineOilTemp: Double?
     @Published private(set) var atfTemp: Double?
     @Published private(set) var coolantTempV2: Double?    // TOYOTA_COOLANT_T from 7C0/2123
+    @Published private(set) var engineSpeed: Double?      // RPM, 2101 payload[12..13]
+    @Published private(set) var throttlePosition: Double? // %, 2101 payload[17]
+    @Published private(set) var throttleVolt: Double?     // %, 2101 payload[18]
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -246,8 +249,7 @@ final class OBDViewModel: ObservableObject {
     // MARK: - Active Parser — Toyota Enhanced Engine Data
 
     /// Parses Toyota enhanced packet 2101 from engine ECU 7E0 (7E8 responds) — multi-frame.
-    /// Coolant temp byte is at payload[11] (OBDb TOYOTA_COOLANT_TEMP; pending on-device confirmation).
-    /// Formula: coolant temp (°C) = payload[11] − 40.
+    /// Decodes coolant, engine speed, and throttle from the payload via decodeToyota2101(_:).
     private func parseToyota2101Line(_ line: String) {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
@@ -256,16 +258,36 @@ final class OBDViewModel: ObservableObject {
             return
         }
 
-        if payload.count > 11,
-           payload[0] == "61", payload[1] == "01",
-           let rawCoolant = UInt8(payload[11], radix: 16) {
-            coolantTemp = Double(rawCoolant) - 40.0
-            lastUpdate = Date()
+        if payload.count > 11, payload[0] == "61", payload[1] == "01" {
+            decodeToyota2101(payload)
             beginToyota2103Query()
             return
         }
 
         handleNonFrameToyota2101Line(line)
+    }
+
+    /// Extracts every value the app reads from a 2101 (61 01) payload — shared by active
+    /// polling and listen-only so the byte offsets can't diverge. Offsets/formulas per OBDb
+    /// (TOYOTA_COOLANT_TEMP / _ENGINE_SPEED / _THROTTLE_SENSOR_POSITION / _THROTTLE_SENSOR_VOLT);
+    /// the 2101 layout is pending on-device confirmation for this ECU.
+    private func decodeToyota2101(_ payload: [String]) {
+        guard payload.count > 11, payload[0] == "61", payload[1] == "01" else { return }
+        if let raw = UInt8(payload[11], radix: 16) {
+            coolantTemp = Double(raw) - 40.0
+        }
+        if payload.count > 13,
+           let hi = UInt8(payload[12], radix: 16),
+           let lo = UInt8(payload[13], radix: 16) {
+            engineSpeed = Double(Int(hi) << 8 | Int(lo))
+        }
+        if payload.count > 17, let raw = UInt8(payload[17], radix: 16) {
+            throttlePosition = Double(raw) * 100.0 / 255.0
+        }
+        if payload.count > 18, let raw = UInt8(payload[18], radix: 16) {
+            throttleVolt = Double(raw) * 100.0 / 255.0
+        }
+        lastUpdate = Date()
     }
 
     /// Parses Toyota enhanced packet 2103 from ECU 7E8.
@@ -541,10 +563,7 @@ final class OBDViewModel: ObservableObject {
 
         switch payload[1] {
         case "01" where payload.count > 11:
-            if let raw = UInt8(payload[11], radix: 16) {
-                coolantTemp = Double(raw) - 40.0
-                lastUpdate = Date()
-            }
+            decodeToyota2101(payload)
         case "03" where payload.count > 5:
             if let rawSTFT = UInt8(payload[4], radix: 16),
                let rawLTFT = UInt8(payload[5], radix: 16) {
@@ -665,6 +684,9 @@ final class OBDViewModel: ObservableObject {
         vm.coolantTempV2 = 88.0
         vm.engineOilTemp = 95.0
         vm.atfTemp       = 72.0
+        vm.engineSpeed       = 1850.0
+        vm.throttlePosition  = 14.5
+        vm.throttleVolt      = 18.2
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()

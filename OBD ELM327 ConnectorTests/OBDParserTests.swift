@@ -184,4 +184,16 @@ struct ValueFormulaTests {
         let pct = (Double(raw) * 200.0 / 256.0) - 100.0
         #expect(abs(pct - (-2.34375)) < 0.0001)
     }
+
+    @Test func engineSpeed_bigEndian16() {
+        // 2101 payload[12..13] = (hi << 8) | lo, rpm. 0x02BC = 700.
+        let hi: UInt8 = 0x02, lo: UInt8 = 0xBC
+        #expect(Double(Int(hi) << 8 | Int(lo)) == 700.0)
+    }
+
+    @Test func throttle_percentScaling() {
+        // 2101 throttle bytes: raw × 100 / 255 → percent.
+        #expect((Double(UInt8(0xFF)) * 100.0 / 255.0) == 100.0)
+        #expect(abs((Double(UInt8(0x80)) * 100.0 / 255.0) - 50.196) < 0.01)
+    }
 }
