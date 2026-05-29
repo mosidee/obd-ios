@@ -29,32 +29,35 @@ Each cycle executes in sequence; each parser calls the next `begin*Query()` on s
 
 ```
 passive (pollingDelay wait, default 1.0 s)
-  → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[18] − 40 → °C
-                                          (also: engine speed payload[11..12] ÷4 rpm,
-                                           throttle pos payload[17] ×100/255 %; Sienta-specific
-                                           layout, NOT OBDb generic — verified from capture)
-  → queryingToyota2103  ATSH7E0 + 2103  STFT/LTFT:  payload[4/5], (raw×200/256)−100 → %
-  → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C
-  → queryingATF         ATSH7E0 + 2182  ATF:        first byte after [61 82] − 40 → °C
+  → queryingStandard    ATSH7E0 + 01 05 0C 11 06 07 49   (SAE J1979 Mode-01 multi-PID)
+                                          coolant  05 → A−40 → °C
+                                          RPM      0C → (256A+B)/4
+                                          throttle 11 → A×100/255 %
+                                          STFT/LTFT 06/07 → A×100/128−100 %
+                                          accel    49 → A×100/255 %
+  → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C  (enhanced)
+  → queryingATF         ATSH7E0 + 2182  ATF:        first byte after [61 82] − 40 → °C  (enhanced)
   → restoringHeader     ATCEA + ATSH7DF
   → passive
 ```
+
+Coolant, RPM, throttle, and fuel trims always come from standard Mode-01 PIDs. Engine oil and ATF have no standard equivalent on this ECU, so they stay Toyota-enhanced (`2151`/`2182`).
 
 Before sending each command, every `begin*Query()` sends `ATCEA` (disable CAN extended addressing) then the target header, with 150 ms delays between. A 5-second watchdog (`armActiveTimeout`) auto-advances if no response arrives.
 
 ## Listen-Only Mode
 
-Gated by the `listenOnlyMode` setting (read in `runELM327Init()`, so it applies on connect). When on, `beginListenOnly()` sends `ATCAF0` (CAN auto-formatting off, so raw `10/21/22` ISO-TP frames reach `OBDParser`), `ATCM7DF` + `ATCF7C8` (CAN mask/filter accepting only 7C8 and 7E8 — required because the single shared multi-frame accumulator is reset by any non-ISO-TP frame, so interleaving noise would break 2101/2151 assembly), then `ATMA` (Monitor All) and sends no OBD requests. The `.listening` state routes every monitored line through `parseListeningLine()`, which reuses `parser.completePayloadTokens` and dispatches by the response PID byte (`payload[1]`: `01`→coolant, `03`→fuel trims, `51`→engine oil, `82`→ATF) using the same formulas as active polling. It's a passive co-monitor: because these are request/response PIDs, values update only while another active tester is polling them on the bus.
+Gated by the `listenOnlyMode` setting (read in `runELM327Init()`, so it applies on connect). When on, `beginListenOnly()` sends `ATCAF0` (CAN auto-formatting off, so raw `10/21/22` ISO-TP frames reach `OBDParser`), `ATCM7DF` + `ATCF7C8` (CAN mask/filter accepting only 7C8 and 7E8 — required because the single shared multi-frame accumulator is reset by any non-ISO-TP frame, so interleaving noise would break 2101/2151 assembly), then `ATMA` (Monitor All) and sends no OBD requests. The `.listening` state routes every monitored line through `parseListeningLine()`, which reuses `parser.completePayloadTokens` and dispatches by the response PID byte (`payload[1]`: `01`→coolant, `03`→fuel trims, `51`→engine oil, `82`→ATF) via the enhanced decode (`decodeToyota2101` for `01`). It's a passive co-monitor: because these are request/response PIDs, values update only while another active tester is polling them on the bus. (Listen-only still decodes *enhanced* `61` frames it sniffs off the bus — active polling, by contrast, requests standard Mode-01 PIDs.)
 
-## Standard OBD-II Mode (standardPIDMode)
+## Standard OBD-II Mode (active polling path)
 
-Gated by the `standardPIDMode` setting (read live in `triggerActiveQuery()`, so it applies on the next cycle — no reconnect). When on, the active cycle replaces the enhanced `2101`/`2103` packets with one generic SAE J1979 Mode-01 multi-PID request: `beginStandardQuery()` sends `01 05 0C 11 06 07 49` (coolant `05`→A−40, RPM `0C`→(256A+B)/4, throttle `11`→A×100/255, STFT/LTFT `06`/`07`→A×100/128−100, accel pedal `49`→A×100/255), decoded by `parseStandardLine` via the static `OBDParser.mode01Values(from:lengths:)` walker. It then chains into the **enhanced** engine-oil query (`2151`) → ATF (`2182`); engine oil and ATF always stay enhanced regardless of this setting. When off, the full enhanced `2101`/`2103`/`2151` chain runs as before. (Note: the `2101` enhanced layout is Sienta-specific — coolant `payload[18]`, RPM `payload[11..12]`÷4 — not OBDb's generic map.)
+Active polling always uses standard SAE J1979 Mode-01 PIDs for coolant, RPM, throttle, and fuel trims. `beginStandardQuery()` (the entry point of every cycle, called from `triggerActiveQuery()`) sends one multi-PID request `01 05 0C 11 06 07 49` (coolant `05`→A−40, RPM `0C`→(256A+B)/4, throttle `11`→A×100/255, STFT/LTFT `06`/`07`→A×100/128−100, accel pedal `49`→A×100/255), decoded by `parseStandardLine` via the static `OBDParser.mode01Values(from:lengths:)` walker. It then chains into the **enhanced** engine-oil query (`2151`) → ATF (`2182`); engine oil and ATF have no standard Mode-01 equivalent on this ECU and stay enhanced. (The enhanced `2101`/`2103` *active* path was removed; `decodeToyota2101` survives only for listen-only sniffing.) **On-car verification of the standard PIDs for these five values is still open** — the transcript only ever confirmed the enhanced 2101 path (coolant payload[18], RPM) on the Sienta.
 
 ## Two Parsing Strategies
 
 Both live on the `OBDParser` struct in `OBDParser.swift`; the ViewModel calls them through its `parser` instance.
 
-**`completePayloadTokens(from:)`** — Stateful (`mutating`), multi-frame aware. Accumulates ISO-TP first frames (`0x10–0x1F`) and consecutive frames (`0x20–0x2F`) into `multiFramePayload`, returns the complete payload only once `multiFramePayload.count >= expectedLength`, or `nil` while still accumulating. Used for 2101, 2103, 2151.
+**`completePayloadTokens(from:)`** — Stateful (`mutating`), multi-frame aware. Accumulates ISO-TP first frames (`0x10–0x1F`) and consecutive frames (`0x20–0x2F`) into `multiFramePayload`, returns the complete payload only once `multiFramePayload.count >= expectedLength`, or `nil` while still accumulating. Used for the enhanced engine-oil `2151` and the standard Mode-01 multi-PID response, plus the `2101`/`2103` frames listen-only sniffs.
 
 **`responsePayloadTokens(from:)`** — Stateless single-frame stripper. Drops the optional CAN ID, extended address byte, and length/first-frame bytes, then returns remaining tokens. Used for 2182 (ATF) which is a known single-frame response.
 

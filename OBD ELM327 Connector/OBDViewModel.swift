@@ -4,25 +4,23 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C  (engine speed payload[11..12] ÷4)
-//    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
+//    Standard   : ATSH7E0 + 01 05 0C 11 06 07 49 — coolant/RPM/throttle/STFT/LTFT/accel pedal (SAE J1979 Mode-01)
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
 //
 //  After all responses are handled, ATSH7DF is restored and the cycle repeats.
+//  (Engine oil and ATF have no standard Mode-01 equivalent on this ECU, so they stay enhanced.)
 
 import Foundation
 import Combine
 
 private enum QueryState {
     case passive         // Waiting between active polling cycles
-    case queryingToyota2101 // Toyota enhanced engine packet 2101; includes coolant temp
-    case queryingToyota2103 // Toyota enhanced engine packet 2103; includes fuel trims
     case queryingEngineOil // Engine oil command sent; awaiting ECU response
     case queryingATF       // ATF command sent; awaiting ECU response
     case restoringHeader   // Restoring normal functional request header before next cycle
     case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
-    case queryingStandard    // Standard mode: multi-PID Mode-01 request (coolant/RPM/throttle/trims)
+    case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/pedal)
 }
 
 enum OBDLogDirection: String {
@@ -47,8 +45,8 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var coolantTemp: Double?
     @Published private(set) var engineOilTemp: Double?
     @Published private(set) var atfTemp: Double?
-    @Published private(set) var engineSpeed: Double?      // RPM, 2101 payload[11..12] ÷4
-    @Published private(set) var throttlePosition: Double? // %, 2101 payload[17] (unconfirmed)
+    @Published private(set) var engineSpeed: Double?      // RPM, standard PID 0C (256A+B)/4
+    @Published private(set) var throttlePosition: Double? // %, standard PID 11 (A×100/255)
     @Published private(set) var accelPedal: Double?       // %, standard PID 49 (accel pedal pos D)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
@@ -81,12 +79,10 @@ final class OBDViewModel: ObservableObject {
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let disableExtendedAddressCommand = "ATCEA"
     private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header (also carries the ATF oil-pan sensor on 7E0/7E8)
-    private let toyotaEngineDataCommand = "2101" // Toyota enhanced engine data packet
-    private let toyotaFuelTrimCommand = "2103"  // Toyota enhanced fuel-trim packet
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
     private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
 
-    // Standard OBD-II Mode 01 (used when the standardPIDMode setting is on)
+    // Standard OBD-II Mode 01 — the active polling request for coolant/RPM/throttle/trims/pedal
     private let standardBatchCommand = "01 05 0C 11 06 07 49" // coolant, RPM, throttle, STFT, LTFT, accel pedal
     private let standardBatchLengths: [String: Int] = ["05": 1, "0C": 2, "11": 1, "06": 1, "07": 1, "49": 1]
 
@@ -220,12 +216,6 @@ final class OBDViewModel: ObservableObject {
         case .passive:
             break   // Nothing is requested between cycles; ignore incoming lines.
 
-        case .queryingToyota2101:
-            parseToyota2101Line(line)
-
-        case .queryingToyota2103:
-            parseToyota2103Line(line)
-
         case .queryingEngineOil:
             parseEngineOilLine(line)
 
@@ -245,31 +235,12 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Active Parser — Toyota Enhanced Engine Data
+    // MARK: - Listen-Only Decode — Toyota Enhanced 2101
 
-    /// Parses Toyota enhanced packet 2101 from engine ECU 7E0 (7E8 responds) — multi-frame.
-    /// Decodes coolant, engine speed, and throttle from the payload via decodeToyota2101(_:).
-    private func parseToyota2101Line(_ line: String) {
-        guard let payload = parser.completePayloadTokens(from: line) else { return }
-
-        if payload.first == "7F" {
-            beginToyota2103Query()
-            return
-        }
-
-        if payload.count > 11, payload[0] == "61", payload[1] == "01" {
-            decodeToyota2101(payload)
-            beginToyota2103Query()
-            return
-        }
-
-        handleNonFrameToyota2101Line(line)
-    }
-
-    /// Extracts every value the app reads from a 2101 (61 01) payload — shared by active
-    /// polling and listen-only so the byte offsets can't diverge. Offsets/formulas per OBDb
-    /// (TOYOTA_COOLANT_TEMP / _ENGINE_SPEED / _THROTTLE_SENSOR_POSITION / _THROTTLE_SENSOR_VOLT);
-    /// the 2101 layout is pending on-device confirmation for this ECU.
+    /// Extracts coolant, engine speed, and throttle from a 2101 (61 01) payload.
+    /// Used only by listen-only mode, which sniffs the enhanced 61-frames another tester
+    /// emits on the bus. Offsets/formulas per OBDb (TOYOTA_COOLANT_TEMP / _ENGINE_SPEED /
+    /// _THROTTLE_SENSOR_POSITION); the 2101 layout is pending on-device confirmation for this ECU.
     private func decodeToyota2101(_ payload: [String]) {
         guard payload.count > 11, payload[0] == "61", payload[1] == "01" else { return }
         // Engine speed: standard PID-0C formula (A·256 + B) / 4 → rpm, A=payload[11], B=payload[12].
@@ -287,44 +258,6 @@ final class OBDViewModel: ObservableObject {
             coolantTemp = Double(raw) - 40.0
         }
         lastUpdate = Date()
-    }
-
-    /// Parses Toyota enhanced packet 2103 from ECU 7E8.
-    /// The log shows STFT/LTFT after two status bytes: `61 03 02 00 7F 8D ...`.
-    private func parseToyota2103Line(_ line: String) {
-        guard let payload = parser.completePayloadTokens(from: line) else { return }
-
-        if payload.first == "7F" {
-            beginEngineOilQuery()
-            return
-        }
-
-        if payload.count > 5,
-           payload[0] == "61", payload[1] == "03",
-           let rawSTFT = UInt8(payload[4], radix: 16),
-           let rawLTFT = UInt8(payload[5], radix: 16) {
-            stft = (Double(rawSTFT) * 200.0 / 256.0) - 100.0
-            ltft = (Double(rawLTFT) * 200.0 / 256.0) - 100.0
-            lastUpdate = Date()
-            beginEngineOilQuery()
-            return
-        }
-
-        handleNonFrameToyota2103Line(line)
-    }
-
-    private func handleNonFrameToyota2101Line(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginToyota2103Query() }
-    }
-
-    private func handleNonFrameToyota2103Line(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginEngineOilQuery() }
     }
 
     // MARK: - Active Parser — Engine Oil Temperature
@@ -386,35 +319,6 @@ final class OBDViewModel: ObservableObject {
                       || line.contains("ERROR")
                       || line.contains("UNABLE TO CONNECT")
         if isTerminal { returnToPassive() }
-    }
-
-    private func beginToyota2101Query() {
-        activeQueryTimeoutTask?.cancel()
-        parser.reset()
-        queryState = .queryingToyota2101
-        connectionStatus = "Querying Toyota Engine Data..."
-        sendEngineRequest(toyotaEngineDataCommand)
-    }
-
-    private func beginToyota2103Query() {
-        activeQueryTimeoutTask?.cancel()
-        parser.reset()
-        queryState = .queryingToyota2103
-        connectionStatus = "Querying Toyota Fuel Trims..."
-        sendEngineRequest(toyotaFuelTrimCommand)
-    }
-
-    private func sendEngineRequest(_ command: String) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.sendCommand(self.disableExtendedAddressCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand(self.engineHeaderCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            guard self.queryState == .queryingToyota2101 || self.queryState == .queryingToyota2103 else { return }
-            self.sendCommand(command)
-            self.armActiveTimeout()
-        }
     }
 
     private func beginEngineOilQuery() {
@@ -536,7 +440,7 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Standard OBD-II Mode 01 (standardPIDMode)
+    // MARK: - Active Parser — Standard OBD-II Mode 01
 
     /// Sends a single multi-PID Mode-01 request to the engine ECU for coolant, RPM,
     /// throttle, and fuel trims; the response is decoded by `parseStandardLine`.
@@ -609,11 +513,7 @@ final class OBDViewModel: ObservableObject {
             scheduleNextActiveQuery()  // Back off and retry later
             return
         }
-        if UserDefaults.standard.bool(forKey: "standardPIDMode") {
-            beginStandardQuery()       // Standard Mode-01 PIDs
-        } else {
-            beginToyota2101Query()     // Toyota enhanced packets
-        }
+        beginStandardQuery()           // Standard Mode-01 PIDs → enhanced oil → enhanced ATF
     }
 
     // MARK: - Communication Log
@@ -704,16 +604,12 @@ final class OBDViewModel: ObservableObject {
             guard !Task.isCancelled, let self else { return }
 
             switch self.queryState {
-            case .queryingToyota2101:
-                self.beginToyota2103Query()
-            case .queryingToyota2103:
+            case .queryingStandard:
                 self.beginEngineOilQuery()
             case .queryingEngineOil:
                 self.beginATFQuery()
             case .queryingATF:
                 self.returnToPassive()
-            case .queryingStandard:
-                self.beginEngineOilQuery()
             case .passive, .restoringHeader, .listening:
                 break
             }

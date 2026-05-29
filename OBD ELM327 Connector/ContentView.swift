@@ -167,7 +167,7 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Engine Card (from 2101)
+    // MARK: - Engine Card (RPM / throttle / pedal, standard Mode-01 PIDs)
 
     private var engineCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -407,7 +407,6 @@ struct SettingsView: View {
     @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
     @AppStorage("loggingEnabled")  private var loggingEnabled: Bool = false
     @AppStorage("listenOnlyMode")  private var listenOnlyMode: Bool = false
-    @AppStorage("standardPIDMode") private var standardPIDMode: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -415,11 +414,10 @@ struct SettingsView: View {
             Form {
                 Section {
                     Toggle("Listen-Only (passive monitor)", isOn: $listenOnlyMode)
-                    Toggle("Standard OBD-II PIDs", isOn: $standardPIDMode)
                 } header: {
                     Text("Mode")
                 } footer: {
-                    Text("Listen-Only (applies on next connect): passively sniffs the bus instead of requesting data. Standard OBD-II PIDs: reads coolant, RPM, throttle, and fuel trims from generic Mode-01 PIDs instead of Toyota enhanced packets — engine oil and ATF always stay enhanced.")
+                    Text("Listen-Only (applies on next connect): passively sniffs the bus instead of requesting data.")
                 }
 
                 Section("Polling") {
