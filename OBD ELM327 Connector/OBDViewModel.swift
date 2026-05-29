@@ -4,7 +4,7 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Coolant    : ATSH7E0 + 2101, payload[18] − 40 → °C
+//    Coolant    : ATSH7E0 + 2101, payload[11] − 40 → °C
 //    Fuel trims : ATSH7E0 + 2103, payload[4/5] → STFT / LTFT
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
@@ -246,8 +246,8 @@ final class OBDViewModel: ObservableObject {
     // MARK: - Active Parser — Toyota Enhanced Engine Data
 
     /// Parses Toyota enhanced packet 2101 from engine ECU 7E0 (7E8 responds) — multi-frame.
-    /// Coolant temp byte is at payload[18] (empirically verified on this ECU).
-    /// Formula: coolant temp (°C) = payload[18] − 40.
+    /// Coolant temp byte is at payload[11] (OBDb TOYOTA_COOLANT_TEMP; pending on-device confirmation).
+    /// Formula: coolant temp (°C) = payload[11] − 40.
     private func parseToyota2101Line(_ line: String) {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
@@ -256,9 +256,9 @@ final class OBDViewModel: ObservableObject {
             return
         }
 
-        if payload.count > 18,
+        if payload.count > 11,
            payload[0] == "61", payload[1] == "01",
-           let rawCoolant = UInt8(payload[18], radix: 16) {
+           let rawCoolant = UInt8(payload[11], radix: 16) {
             coolantTemp = Double(rawCoolant) - 40.0
             lastUpdate = Date()
             beginToyota2103Query()
@@ -540,8 +540,8 @@ final class OBDViewModel: ObservableObject {
         guard payload.first == "61", payload.count >= 2 else { return }
 
         switch payload[1] {
-        case "01" where payload.count > 18:
-            if let raw = UInt8(payload[18], radix: 16) {
+        case "01" where payload.count > 11:
+            if let raw = UInt8(payload[11], radix: 16) {
                 coolantTemp = Double(raw) - 40.0
                 lastUpdate = Date()
             }

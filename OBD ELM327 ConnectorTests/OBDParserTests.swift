@@ -37,7 +37,7 @@ struct CompletePayloadTokensTests {
         #expect(p.completePayloadTokens(from: "7E8 10 1C 61 01 00 00 00 00") == nil)
         // Consecutive frames: each adds 7 bytes (still under 28 total)
         #expect(p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 00 00") == nil)
-        // CF2: payload[18] will be 0x7E = 86°C (position 5 within this frame = global index 18)
+        // CF2: still accumulating (payload not yet complete)
         #expect(p.completePayloadTokens(from: "7E8 22 00 00 00 00 00 7E 00") == nil)
         #expect(p.completePayloadTokens(from: "7E8 23 00 00 00 00 00 00 00") == nil)
     }
@@ -54,15 +54,15 @@ struct CompletePayloadTokensTests {
         #expect(payload?[0] == "61" && payload?[1] == "01")
     }
 
-    @Test func multiFrame_coolant2101_coolantByteAtIndex18() {
-        // Verifies that payload[18] carries the coolant raw byte (0x7E = 86°C after −40)
+    @Test func multiFrame_coolant2101_coolantByteAtIndex11() {
+        // Verifies that payload[11] carries the coolant raw byte (0x7E = 86°C after −40)
         var p = OBDParser()
         p.completePayloadTokens(from: "7E8 10 1C 61 01 00 00 00 00")
-        p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 00 00")
-        p.completePayloadTokens(from: "7E8 22 00 00 00 00 00 7E 00")
+        p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 7E 00")   // 0x7E lands at index 11
+        p.completePayloadTokens(from: "7E8 22 00 00 00 00 00 00 00")
         p.completePayloadTokens(from: "7E8 23 00 00 00 00 00 00 00")
         let payload = p.completePayloadTokens(from: "7E8 24 00 00 00 00 00 00 00")!
-        let raw = UInt8(payload[18], radix: 16)!   // 0x7E = 126
+        let raw = UInt8(payload[11], radix: 16)!   // 0x7E = 126
         #expect(Double(raw) - 40.0 == 86.0)
     }
 
@@ -143,7 +143,7 @@ struct RawByteTests {
 struct ValueFormulaTests {
 
     @Test func coolantTemp_rawMinusForty() {
-        // payload[18] formula: raw − 40
+        // payload[11] formula: raw − 40
         let raw: UInt8 = 0x7E   // 126
         #expect(Double(raw) - 40.0 == 86.0)
     }

@@ -29,7 +29,7 @@ Each cycle executes in sequence; each parser calls the next `begin*Query()` on s
 
 ```
 passive (pollingDelay wait, default 1.0 s)
-  → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[18] − 40 → °C
+  → queryingToyota2101  ATSH7E0 + 2101  coolant:    payload[11] − 40 → °C
   → queryingToyota2103  ATSH7E0 + 2103  STFT/LTFT:  payload[4/5], (raw×200/256)−100 → %
   → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C
   → queryingATF         ATSH7E0 + 2182  ATF:        first byte after [61 82] − 40 → °C
