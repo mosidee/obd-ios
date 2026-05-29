@@ -185,12 +185,6 @@ struct ValueFormulaTests {
         #expect(Double(raw) - 40.0 == 40.0)
     }
 
-    @Test func coolantV2_rawTimesHalf() {
-        // From real TX/RX log: 7C8 03 61 23 7D → raw=0x7D=125 → 62.5°C
-        let raw: UInt8 = 0x7D   // 125
-        #expect(Double(raw) * 0.5 == 62.5)
-    }
-
     @Test func fuelTrim_zeroAtMidpoint() {
         // raw=0x80=128 → (128 × 200 / 256) − 100 = 0%
         let raw: UInt8 = 0x80

@@ -17,7 +17,6 @@ struct ContentView: View {
                     statusRow
                     fuelTrimCard
                     oilTempsCard
-                    coolantCard
                     engineCard
                     if loggingEnabled {
                         communicationLogCard
@@ -117,13 +116,15 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Oil Temperatures Card (ATF + Engine Oil)
+    // MARK: - Fluid Temperatures Card (ATF + Engine Oil + Coolant)
 
     private var oilTempsCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Oil Temperatures", systemImage: "thermometer.medium")
+            Label("Fluid Temperatures", systemImage: "thermometer.medium")
                 .font(.headline)
             HStack(spacing: 0) {
+                oilTempCell(label: "Coolant", value: viewModel.coolantTemp, color: coolantColor, badge: coolantLabel)
+                Divider().frame(height: 60)
                 oilTempCell(label: "Trans Fluid", value: viewModel.atfTemp, color: atfColor, badge: atfLabel)
                 Divider().frame(height: 60)
                 oilTempCell(label: "Engine Oil", value: viewModel.engineOilTemp, color: engineOilColor, badge: engineOilLabel)
@@ -161,48 +162,6 @@ struct ContentView: View {
             } else {
                 Text(" ").font(.caption2)
             }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 4)
-    }
-
-    // MARK: - Coolant Temp Card
-
-    private var coolantCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Coolant Temp", systemImage: "thermometer.medium")
-                .font(.headline)
-            HStack(spacing: 0) {
-                coolantV2Cell(label: "7E0", subtitle: "2101 sensor", value: viewModel.coolantTemp)
-                Divider().frame(height: 60)
-                coolantV2Cell(label: "7C0", subtitle: "2123 sensor", value: viewModel.coolantTempV2)
-            }
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    @ViewBuilder
-    private func coolantV2Cell(label: String, subtitle: String, value: Double?) -> some View {
-        VStack(spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(value.map { String(format: "%.1f", $0) } ?? "—")
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
-                    .foregroundStyle(coolantV2TempColor(value))
-                    .monospacedDigit()
-                if value != nil {
-                    Text("°C")
-                        .font(.callout.bold())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Text(subtitle)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
@@ -412,11 +371,18 @@ struct ContentView: View {
         return "Hot"
     }
 
-    private func coolantV2TempColor(_ temp: Double?) -> Color {
-        guard let t = temp else { return .primary }
+    private var coolantColor: Color {
+        guard let t = viewModel.coolantTemp else { return .primary }
         if t < 95  { return .green }
         if t < 105 { return .orange }
         return .red
+    }
+
+    private var coolantLabel: String {
+        guard let t = viewModel.coolantTemp else { return "" }
+        if t < 95  { return "Normal" }
+        if t < 105 { return "Warm" }
+        return "Hot"
     }
 
     private var engineOilColor: Color {
@@ -453,7 +419,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Mode")
                 } footer: {
-                    Text("Listen-Only (applies on next connect): passively sniffs the bus instead of requesting data. Standard OBD-II PIDs: reads coolant, RPM, throttle, and fuel trims from generic Mode-01 PIDs instead of Toyota enhanced packets — engine oil, ATF, and the 7C0 coolant always stay enhanced.")
+                    Text("Listen-Only (applies on next connect): passively sniffs the bus instead of requesting data. Standard OBD-II PIDs: reads coolant, RPM, throttle, and fuel trims from generic Mode-01 PIDs instead of Toyota enhanced packets — engine oil and ATF always stay enhanced.")
                 }
 
                 Section("Polling") {
