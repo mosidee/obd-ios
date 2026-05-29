@@ -21,7 +21,7 @@ Four files carry all the logic:
 
 **`OBDParser.swift`** — Frame decoding, extracted from `OBDViewModel` so it's unit-testable without `@MainActor`/Bluetooth. A `struct` holding the multi-frame accumulation state; exposes `completePayloadTokens(from:)` (mutating, multi-frame), `responsePayloadTokens(from:)` (stateless, single-frame), `reset()`, and the static `rawByte(after:in:)`. Contains zero CoreBluetooth or UI code.
 
-**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders temperature cards, fuel trim cells, and a live TX/RX log, plus a `SettingsView` sheet (polling interval, keep-screen-awake via `UIApplication.shared.isIdleTimerDisabled`, both `@AppStorage`-backed). Uses `#if DEBUG` extension init + `OBDViewModel.preview` static factory for SwiftUI previews.
+**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders temperature cards and fuel trim cells (the Fuel Trims header shows the STFT+LTFT total), plus an optional live TX/RX log card shown only when the `loggingEnabled` setting is on. Includes a `SettingsView` sheet (polling interval, keep-screen-awake via `UIApplication.shared.isIdleTimerDisabled`, and the `loggingEnabled` toggle — all `@AppStorage`-backed). Uses `#if DEBUG` extension init + `OBDViewModel.preview` static factory for SwiftUI previews.
 
 ## OBD Polling Chain
 

@@ -127,7 +127,9 @@ struct OBDParser {
     // MARK: - Private
 
     private mutating func completedPayloadIfReady() -> [String]? {
-        guard let expected = multiFrameExpectedLength else { return multiFramePayload }
+        // A consecutive frame with no preceding first frame leaves expectedLength nil;
+        // return nil rather than a partial accumulator.
+        guard let expected = multiFrameExpectedLength else { return nil }
         guard multiFramePayload.count >= expected else { return nil }
         let payload = Array(multiFramePayload.prefix(expected))
         reset()

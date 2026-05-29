@@ -77,6 +77,15 @@ struct CompletePayloadTokensTests {
         #expect(Double(raw) - 40.0 == 50.0)
     }
 
+    @Test func consecutiveFrame_withoutFirstFrame_returnsNil() {
+        // A consecutive frame (0x2x) with no preceding first frame has no expected
+        // length, so the parser must return nil rather than a partial payload.
+        var p = OBDParser()
+        #expect(p.completePayloadTokens(from: "7E8 21 00 00 00 00 00 00 00") == nil)
+        // State stays clean: a following single-frame still parses correctly.
+        #expect(p.completePayloadTokens(from: "7C8 03 61 23 7D") == ["61", "23", "7D"])
+    }
+
     @Test func reset_clearsAccumulatedFrames() {
         // Start a multi-frame sequence, reset, then process a new single-frame
         var p = OBDParser()

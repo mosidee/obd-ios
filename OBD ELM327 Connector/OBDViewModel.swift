@@ -75,7 +75,6 @@ final class OBDViewModel: ObservableObject {
     private var isInitializing = false
     private var parser = OBDParser()
 
-    private let loggingEnabled = false   // set true to re-enable TX/RX log
     private let maxLogEntries = 120
     private let logFileNameOnDisk = "obd_tx_rx_log.txt"
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
@@ -526,7 +525,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func appendLog(direction: OBDLogDirection, message: String) {
-        guard loggingEnabled else { return }
+        guard UserDefaults.standard.bool(forKey: "loggingEnabled") else { return }
         let entry = OBDCommunicationLogEntry(
             timestamp: Date(),
             direction: direction,

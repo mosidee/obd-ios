@@ -8,6 +8,7 @@ import UIKit
 struct ContentView: View {
     @StateObject private var viewModel = OBDViewModel()
     @State private var showingSettings = false
+    @AppStorage("loggingEnabled") private var loggingEnabled: Bool = false
 
     var body: some View {
         NavigationView {
@@ -17,7 +18,9 @@ struct ContentView: View {
                     fuelTrimCard
                     oilTempsCard
                     coolantCard
-                    // communicationLogCard
+                    if loggingEnabled {
+                        communicationLogCard
+                    }
                     Spacer(minLength: 8)
                     connectButton
                 }
@@ -63,8 +66,15 @@ struct ContentView: View {
 
     private var fuelTrimCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Fuel Trims", systemImage: "gauge.with.needle")
-                .font(.headline)
+            HStack {
+                Label("Fuel Trims", systemImage: "gauge.with.needle")
+                    .font(.headline)
+                Spacer()
+                Text(fuelTrimSum.map { String(format: "Total %+.2f%%", $0) } ?? "")
+                    .font(.headline)
+                    .foregroundStyle(trimColor(fuelTrimSum))
+                    .monospacedDigit()
+            }
             HStack(spacing: 0) {
                 trimCell(label: "STFT", subtitle: "Short Term", value: viewModel.stft)
                 Divider().frame(height: 60)
@@ -74,6 +84,11 @@ struct ContentView: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var fuelTrimSum: Double? {
+        guard let stft = viewModel.stft, let ltft = viewModel.ltft else { return nil }
+        return stft + ltft
     }
 
     @ViewBuilder
@@ -381,6 +396,7 @@ struct ContentView: View {
 struct SettingsView: View {
     @AppStorage("pollingDelay")    private var pollingDelay: Double = 1.0
     @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
+    @AppStorage("loggingEnabled")  private var loggingEnabled: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -405,6 +421,10 @@ struct SettingsView: View {
                         .onChange(of: keepScreenAwake) { _, newValue in
                             UIApplication.shared.isIdleTimerDisabled = newValue
                         }
+                }
+
+                Section("Diagnostics") {
+                    Toggle("TX/RX Logging", isOn: $loggingEnabled)
                 }
             }
             .navigationTitle("Settings")
