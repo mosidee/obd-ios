@@ -181,7 +181,7 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Engine Card (RPM / throttle / pedal, standard Mode-01 PIDs)
+    // MARK: - Engine Card (RPM / throttle / load, standard Mode-01 PIDs)
 
     private var engineCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -192,7 +192,7 @@ struct ContentView: View {
                 Divider().frame(height: 60)
                 engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
                 Divider().frame(height: 60)
-                engineCell(label: "Pedal", value: viewModel.accelPedal, format: "%.1f", unit: "%")
+                engineCell(label: "Load", value: viewModel.engineLoad, format: "%.1f", unit: "%")
             }
         }
         .padding()
@@ -488,7 +488,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Data Logging records STFT, LTFT, RPM, Throttle, Pedal and Coolant with timestamps to a CSV you can share via AirDrop for tuning.")
+                    Text("Data Logging records STFT, LTFT, RPM, Throttle, Engine Load and Coolant with timestamps to a CSV you can share via AirDrop for tuning.")
                 }
             }
             .navigationTitle("Settings")

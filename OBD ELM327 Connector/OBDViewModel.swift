@@ -4,7 +4,7 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Standard   : ATSH7E0 + 01 05 0C 11 06 07 49 — coolant/RPM/throttle/STFT/LTFT/accel pedal (SAE J1979 Mode-01)
+//    Standard   : ATSH7E0 + 01 05 0C 11 06 07 04 — coolant/RPM/throttle/STFT/LTFT/engine load (SAE J1979 Mode-01)
 //    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
 //    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
 //
@@ -20,7 +20,7 @@ private enum QueryState {
     case queryingATF       // ATF command sent; awaiting ECU response
     case restoringHeader   // Restoring normal functional request header before next cycle
     case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
-    case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/pedal)
+    case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/load)
 }
 
 enum OBDLogDirection: String {
@@ -47,7 +47,7 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var atfTemp: Double?
     @Published private(set) var engineSpeed: Double?      // RPM, standard PID 0C (256A+B)/4
     @Published private(set) var throttlePosition: Double? // %, standard PID 11 (A×100/255)
-    @Published private(set) var accelPedal: Double?       // %, standard PID 49 (accel pedal pos D)
+    @Published private(set) var engineLoad: Double?       // %, standard PID 04 (calculated engine load A×100/255)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -86,7 +86,7 @@ final class OBDViewModel: ObservableObject {
     private let maxLogEntries = 120
     private let txRxFilePrefix = "obd_txrx_"   // + timestamp + ".txt", one file per connection
     private let dataLogFilePrefix = "obd_tune_" // + timestamp + ".csv", one file per connection
-    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,Pedal,Coolant\n"
+    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant\n"
     private var sessionTimestamp: Date?         // Set at connect; both session filenames derive from it
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let disableExtendedAddressCommand = "ATCEA"
@@ -94,9 +94,9 @@ final class OBDViewModel: ObservableObject {
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
     private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
 
-    // Standard OBD-II Mode 01 — the active polling request for coolant/RPM/throttle/trims/pedal
-    private let standardBatchCommand = "01 05 0C 11 06 07 49" // coolant, RPM, throttle, STFT, LTFT, accel pedal
-    private let standardBatchLengths: [String: Int] = ["05": 1, "0C": 2, "11": 1, "06": 1, "07": 1, "49": 1]
+    // Standard OBD-II Mode 01 — the active polling request for coolant/RPM/throttle/trims/load
+    private let standardBatchCommand = "01 05 0C 11 06 07 04" // coolant, RPM, throttle, STFT, LTFT, engine load
+    private let standardBatchLengths: [String: Int] = ["05": 1, "0C": 2, "11": 1, "06": 1, "07": 1, "04": 1]
 
     // MARK: - Init
 
@@ -374,7 +374,7 @@ final class OBDViewModel: ObservableObject {
 
     /// Entry point for listen mode. Engine oil and ATF have no standard Mode-01 PID, so they
     /// can only be obtained by requesting them; the six standard values (coolant/RPM/throttle/
-    /// STFT/LTFT/pedal) are sniffed from another tester's Mode-01 traffic. The ELM327 can't
+    /// STFT/LTFT/load) are sniffed from another tester's Mode-01 traffic. The ELM327 can't
     /// monitor and request at the same time, so the mode alternates: poll oil → ATF, then enter
     /// ATMA for one polling interval, then repeat.
     ///
@@ -452,7 +452,7 @@ final class OBDViewModel: ObservableObject {
         if let v = values["11"] { throttlePosition = Double(v[0]) * 100.0 / 255.0 }
         if let v = values["06"] { stft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
         if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
-        if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
+        if let v = values["04"] { engineLoad = Double(v[0]) * 100.0 / 255.0 }
         lastUpdate = Date()
         logTuningSample()
     }
@@ -495,7 +495,7 @@ final class OBDViewModel: ObservableObject {
             if let v = values["11"] { throttlePosition = Double(v[0]) * 100.0 / 255.0 }
             if let v = values["06"] { stft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
             if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
-            if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
+            if let v = values["04"] { engineLoad = Double(v[0]) * 100.0 / 255.0 }
             lastUpdate = Date()
             logTuningSample()
             beginEngineOilQuery()
@@ -620,7 +620,7 @@ final class OBDViewModel: ObservableObject {
             Self.csvField(ltft, decimals: 2),
             Self.csvField(engineSpeed, decimals: 0),
             Self.csvField(throttlePosition, decimals: 1),
-            Self.csvField(accelPedal, decimals: 1),
+            Self.csvField(engineLoad, decimals: 1),
             Self.csvField(coolantTemp, decimals: 1),
         ].joined(separator: ",") + "\n"
 
@@ -714,7 +714,7 @@ final class OBDViewModel: ObservableObject {
         vm.atfTemp       = 72.0
         vm.engineSpeed       = 736.0
         vm.throttlePosition  = 14.5
-        vm.accelPedal        = 12.0
+        vm.engineLoad        = 28.0
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()
