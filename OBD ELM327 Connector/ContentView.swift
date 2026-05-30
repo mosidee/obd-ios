@@ -181,7 +181,7 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Engine Card (RPM / throttle / load, standard Mode-01 PIDs)
+    // MARK: - Engine Card (RPM / load / throttle, standard Mode-01 PIDs)
 
     private var engineCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -190,9 +190,9 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 engineCell(label: "RPM", value: viewModel.engineSpeed, format: "%.0f", unit: "")
                 Divider().frame(height: 60)
-                engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
-                Divider().frame(height: 60)
                 engineCell(label: "Load", value: viewModel.engineLoad, format: "%.1f", unit: "%")
+                Divider().frame(height: 60)
+                engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
             }
         }
         .padding()
