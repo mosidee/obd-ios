@@ -37,11 +37,13 @@ After init, branch: **listen mode** if the setting is on, else **active polling*
 | Engine load | **Standard** | Mode-01 PID `04` |
 | Engine oil temp | **Custom (Toyota enhanced)** | Mode-21 PID `2151` |
 | Trans fluid / ATF temp | **Custom (Toyota enhanced)** | Mode-21 PID `2182` |
+| Injector pulse width | **Custom (Toyota enhanced)** | Mode-21 PID `213C` |
+| Injection volume | **Custom (Toyota enhanced)** | Mode-21 PID `2137` |
 
 **Defining rule:** the 6 standard values can be *requested* (active) **or** *passively
-sniffed* (listen), because any tester on the bus produces `41` responses for them. The 2
+sniffed* (listen), because any tester on the bus produces `41` responses for them. The 4
 custom values have **no standard PID**, so they can **only** be obtained by actively
-requesting `2151`/`2182` — never sniffable, so even listen mode polls them.
+requesting `2151`/`2182`/`213C`/`2137` — never sniffable, so even listen mode polls them.
 
 ## 3. PID decode formulas
 
@@ -72,45 +74,85 @@ Request `21 <pid>`. Response begins with `61`, then the PID byte, then data.
 |---|---|---|---|
 | `2151` (engine oil) | `61 51 …` | `payload[11] − 40` (multi-frame, declared length `0x0C`=12; oil byte is the 10th data byte after `61 51`) | °C |
 | `2182` (ATF) | `61 82 XX` | `XX − 40` (byte immediately after the `61 82` sequence; single frame) | °C |
+| `213C` (injector pulse) | `61 3C A B C D E` | `(256·C + D) / 1000` (the **2nd** 16-bit field = 3rd/4th bytes after `61 3C`, a µs value; single frame) | ms |
+| `2137` (injection volume) | `61 37 A B …` | `(256·A + B) × 2.047 / 65535` (first 16-bit field after `61 37`; multi-frame, declared `0x11`=17) | ml |
 
 > `payload` = the assembled ISO-TP payload starting at `61`. So `payload[0]=61`,
 > `payload[1]=51`, `payload[11]` = oil temp raw.
 
+> **`213C` is confirmed on-car against Car Scanner.** The response carries **two** 16-bit fields.
+> The live injector pulse width is the **second** one (`C·D`): a Car Scanner capture read 2.8–2.9 ms
+> while `C·D` decoded to 2.87–2.95 ms (warm idle), and it rises under load — while the first field
+> `A·B` is a slow staircase (an averaged/adapted value that barely moves under load). The `/1000`
+> scaling converts the µs field to ms. (The earlier `21F3` guess returned `7F 21 12` — not supported
+> — and was replaced by `213C`.)
+
+> **`2137` (injection volume) is confirmed on-car**: a Car Scanner capture showed 1.6 ml while the
+> first 16-bit field (`C8 A2` = 51362) × 2.047/65535 = 1.604 ml. Note the community lists attribute
+> this volume formula to `213C`, but on this car `213C` is the pulse width and `2137` is the volume.
+
 ## 4. Active polling mode
 
-Loop forever, one cycle per `pollingDelay` (default 1.0 s):
+**What this mode does:** actively requests everything — the 6 standard values in one Mode-01
+batch, then the 3 enhanced values one at a time — then waits. Nothing else needs to be on the
+bus. The engine header `7E0` is set **once for the whole session** (before the first cycle) and
+reused by every read in every cycle, so the steady-state loop sends **no AT commands at all**.
 
 ```
-wait pollingDelay
-STEP 1 — Standard batch:
+ONCE (before the first cycle):
    send ATCEA          (150 ms)
-   send ATSH7E0        (150 ms)   ← engine ECU header
-   send "01 05 0C 11 06 07 49"
-   on 41 response: decode coolant/RPM/throttle/STFT/LTFT/load  → STEP 2
-STEP 2 — Engine oil (enhanced):
-   send ATCEA          (150 ms)
-   send ATSH7E0        (150 ms)
-   send 2151
-   on 61 51 response: oil = payload[11]−40  → STEP 3
-STEP 3 — ATF (enhanced):
-   send ATCEA          (150 ms)
-   send ATSH7E0        (150 ms)
-   send 2182
-   on 61 82 response: atf = byte after [61 82] − 40  → STEP 4
-STEP 4 — Restore:
-   send ATCEA
-   send ATSH7DF        ← back to functional header
-   wait for ">" prompt → wait pollingDelay → STEP 1
+   send ATSH7E0        (150 ms)   ← engine ECU header — stays active for the whole session
+
+loop, one cycle per pollingDelay (default 1.0 s):
+   wait pollingDelay
+   STEP 1 — Standard batch:
+      send "01 05 0C 11 06 07 04"      ← header already 7E0, command only
+      on 41 response: decode coolant/RPM/throttle/STFT/LTFT/load  → STEP 2
+   STEP 2 — Injector pulse (enhanced):
+      send 213C
+      on 61 3C A B C D E response: injector = (256·C + D) / 1000 ms  (2nd 16-bit field)  → STEP 3
+   STEP 3 — Injection volume (enhanced):
+      send 2137
+      on 61 37 A B … response: volume = (256·A + B) × 2.047 / 65535 ml  (multi-frame)  → STEP 4
+   STEP 4 — Engine oil (enhanced):
+      send 2151
+      on 61 51 response: oil = payload[11]−40  → STEP 5
+   STEP 5 — ATF (enhanced):
+      send 2182
+      on 61 82 response: atf = byte after [61 82] − 40  → next cycle
+   (no header restore — 7E0 persists; → wait pollingDelay → STEP 1)
 ```
+
+**Wait for the `>` prompt between steps.** Each step advances only after the ELM327 emits its
+`>` ready-prompt — *not* the instant the response bytes arrive. Sending the next command while
+the adapter is still in its inter-response wait makes it abort the new command with `STOPPED`
+(a lost command → 5 s watchdog stall). So: send → read response → **wait for `>`** → next step.
 
 **Error/NRC handling at every step:** if the response is `7F` (negative response code), or
-contains `NO DATA` / `ERROR` / `UNABLE TO CONNECT`, **skip to the next step anyway**. A
-**5-second watchdog** per step auto-advances if nothing arrives.
+contains `NO DATA` / `ERROR` / `UNABLE TO CONNECT` / `STOPPED`, **skip to the next step** (still
+after the `>`). A **5-second watchdog** per step auto-advances if nothing arrives at all.
+
+**Why the header is set only once:** `ATSH7E0` stays the active request header until something
+changes it — and nothing in the loop does (the standard batch is requested on `7E0`, not the
+functional `7DF`, so there is no restore step). Re-sending `ATCEA + ATSH7E0` every cycle, or
+before each read, is also correct — just slower; this client sends it once per session.
+
+**Self-heal:** if a whole cycle returns no data on any read, the client re-sends `ATCEA +
+ATSH7E0` at the start of the next cycle. This recovers an adapter that silently lost its header
+config without dropping the BLE link (otherwise a reconnect, which re-runs init, would be needed).
+The trigger is *whole-cycle* failure, not a single read — so an unsupported PID (e.g. a wrong
+enhanced PID returning `7F`/NO DATA every cycle) does not force a re-send as long as another read succeeds.
 
 ## 5. Listen mode (alternating poll + passive sniff)
 
+**What this mode does:** coexists with another tester already on the bus (the Avance48 gas
+ECU) without competing for the standard PIDs. It never requests the 6 standard values —
+it **sniffs** them from the other tester's `41` responses — and only actively requests the 3
+enhanced values nobody else polls. It alternates: a short **poll phase** (request injector →
+oil → ATF) and a **monitor phase** (`ATMA`, sniff standard `41` frames for one interval).
+
 The ELM327 **cannot monitor and request at the same time** (any byte sent stops `ATMA`),
-and oil/ATF can't be sniffed — so listen mode alternates:
+and the 3 enhanced values can't be sniffed — so the two phases alternate forever:
 
 ```
 ON ENTER:
@@ -119,8 +161,10 @@ ON ENTER:
    → POLL PHASE
 
 POLL PHASE (CAF on):
-   poll 2151 (engine oil)   exactly like active STEP 2
-   poll 2182 (ATF)          exactly like active STEP 3
+   poll 213C (injector)        sends ATCEA + ATSH7E0 first (re-establishes 7E0 after the monitor)
+   poll 2137 (injection volume) header already 7E0 → command only (no ATCEA/ATSH re-send)
+   poll 2151 (engine oil)      header already 7E0 → command only
+   poll 2182 (ATF)             header already 7E0 → command only
    → MONITOR PHASE
 
 MONITOR PHASE:
@@ -144,11 +188,11 @@ EXIT MONITOR:
    line. *(This one behaviour needs on-hardware confirmation per adapter.)*
 2. **`CAF0` is required for the monitor phase** so multi-frame standard responses arrive as
    raw `10/21` frames the parser can assemble. It **must be turned back on (`CAF1`) before
-   the poll phase**, or `2151`/`2182` requests go out malformed.
+   the poll phase**, or `213C`/`2137`/`2151`/`2182` requests go out malformed.
 3. **Filter to exactly `7E8`** (`ATCM7FF` + `ATCF7E8`). The parser uses a single shared
    multi-frame accumulator; a frame from any other CAN ID arriving mid-sequence resets it.
 4. **Passive caveat:** the 6 standard values only update while **another active tester** on
-   the bus is polling them — and only *outside* each oil/ATF poll window.
+   the bus is polling them — and only *outside* each oil/ATF/injector poll window.
 
 ## 6. ISO-TP frame parsing (shared by both modes)
 
@@ -179,23 +223,39 @@ payload `[61, 82, 50]` → ATF = `0x50 − 40 = 40 °C`.
 Given an assembled payload starting with `41`: `index=1`; read PID at `payload[index]`,
 look up its byte-length, read that many data bytes, advance `index += 1 + length`. **Stop
 at the first PID not in the length map or if truncated** — so an unknown trailing PID can't
-corrupt earlier values. Length map: `{05:1, 0C:2, 11:1, 06:1, 07:1, 49:1}`.
+corrupt earlier values. Length map: `{05:1, 0C:2, 11:1, 06:1, 07:1, 04:1}`.
 
 ## 7. Mode comparison
 
 | | Active polling | Listen mode |
 |---|---|---|
 | Coolant/RPM/throttle/STFT/LTFT/load | **Requested** (`01 05 0C 11 06 07 04`) | **Sniffed** from another tester's `41` frames |
-| Engine oil / ATF | **Requested** (`2151`/`2182`) | **Requested** (`2151`/`2182`) — same as active |
-| Bus behaviour | Transmits every cycle | Transmits oil/ATF, then monitors |
+| Injector / volume / oil / ATF | **Requested** (`213C`/`2137`/`2151`/`2182`) | **Requested** (`213C`/`2137`/`2151`/`2182`) — same as active |
+| Bus behaviour | Transmits every cycle | Transmits injector/volume/oil/ATF, then monitors |
 | `CAF` state | On throughout | Toggled (on=poll, off=monitor) |
-| Header | `7E0` for requests, `7DF` to restore | `7E0` for requests; filter `7E8` for monitor |
+| Header | `7E0` for all requests; set once per session, **no `7DF` restore** | `7E0` for requests; filter `7E8` for monitor |
+| Header setups | **Once per session** (re-sent only after a connect or a whole no-data cycle) | Once per cycle (CAF/ATMA toggling forces a re-establish) |
+| Steady-state AT commands / cycle | **0** | several (`ATCAF0`/`ATMA`/`" ATCAF1"`) |
 | Needs another tester? | No | Yes, for the 6 standard values |
 
 ## 8. Notes / open items
 
 - The Toyota enhanced `2101`/`2103` packets are **not** used. Both modes get the 6 standard
-  values from generic Mode-01 PIDs; only oil (`2151`) and ATF (`2182`) are enhanced.
-- On-car verification of the 6 standard PIDs on the Sienta is still open (only the older
-  enhanced 2101 path was confirmed on the car).
-- The `" ATCAF1"` ATMA-stop trick is the one adapter-dependent behaviour to verify.
+  values from generic Mode-01 PIDs; only oil (`2151`), ATF (`2182`), injector pulse (`213C`)
+  and injection volume (`2137`) are enhanced.
+- **Confirmed on-car (active capture):** the 6 standard PIDs decode to sensible live values,
+  and `2151`/`2182`/`213C`/`2137` all respond. This supersedes the earlier "standard path unverified" note.
+- **Injector pulse `213C`** = `(256·C + D)/1000 → ms` (the 2nd 16-bit field). C·D is the live
+  fuel-corrected value; the first field A·B is a slow staircase (averaged). **Confirmed against
+  Car Scanner**: a capture showed 2.8–2.9 ms while C·D decoded to 2.87–2.95 ms (warm idle).
+  (`21F3` was the wrong guess: `7F 21 12`, not supported.)
+- **Injection volume `2137`** = `(256·A + B) × 2.047 / 65535 → ml` (first 16-bit field; multi-frame).
+  **Confirmed against Car Scanner**: capture showed 1.6 ml, `C8 A2` × 2.047/65535 = 1.604 ml.
+  Community lists put this formula on `213C`; on this car `213C` is pulse width and `2137` the volume.
+- **`STOPPED` / pacing (fix confirmed on-car, 2026-05-31):** sending the next command on
+  response-receipt (not on `>`) raced the ELM327's inter-response wait and got the command
+  aborted (`STOPPED`) → 5 s watchdog stutter (seen for the first few cycles, then settled). Fixed
+  by gating each step on the `>` prompt; a stray `STOPPED` is also treated as a fast skip. An
+  on-car active-polling run confirmed the full five-read cycle paces cleanly without the stutters.
+- The `" ATCAF1"` ATMA-stop trick is the one adapter-dependent behaviour still to verify (the
+  on-car capture was active mode only).

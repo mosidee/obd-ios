@@ -77,6 +77,19 @@ struct CompletePayloadTokensTests {
         #expect(Double(raw) - 40.0 == 50.0)
     }
 
+    @Test func multiFrame_injectionVolume2137_firstField() {
+        // Injection volume 2137: declared 0x11=17 bytes; first 16-bit after `61 37` = C8 A2 = 51362.
+        var p = OBDParser()
+        #expect(p.completePayloadTokens(from: "7E8 10 11 61 37 C8 A2 82 68") == nil)
+        #expect(p.completePayloadTokens(from: "7E8 21 7F A0 80 2B 01 EB 0E") == nil)
+        let payload = p.completePayloadTokens(from: "7E8 22 C8 00 84 00 00 00 00")!
+        #expect(payload.count == 17)
+        #expect(payload[0] == "61" && payload[1] == "37")
+        let a = UInt8(payload[2], radix: 16)!, b = UInt8(payload[3], radix: 16)!  // C8 A2
+        let ml = (Double(a) * 256.0 + Double(b)) * 2.047 / 65535.0
+        #expect(abs(ml - 1.604) < 0.001)   // matches Car Scanner's ~1.6 ml at idle
+    }
+
     @Test func consecutiveFrame_withoutFirstFrame_returnsNil() {
         // A consecutive frame (0x2x) with no preceding first frame has no expected
         // length, so the parser must return nil rather than a partial payload.
@@ -106,6 +119,13 @@ struct ResponsePayloadTokensTests {
         let p = OBDParser()
         let tokens = p.responsePayloadTokens(from: "7E8 03 61 82 50")
         #expect(tokens == ["61", "82", "50"])
+    }
+
+    @Test func injectorPulse_stripsCanIdAndLength() {
+        // Injector pulse response: 7E8 07 61 3C 0F E9 10 16 69 → strips 7E8 (CAN ID) and 07 (length)
+        let p = OBDParser()
+        let tokens = p.responsePayloadTokens(from: "7E8 07 61 3C 0F E9 10 16 69")
+        #expect(tokens == ["61", "3C", "0F", "E9", "10", "16", "69"])
     }
 
     @Test func stripsExtendedAddressByte() {
@@ -183,6 +203,15 @@ struct ValueFormulaTests {
     @Test func atfTemp_rawMinusForty() {
         let raw: UInt8 = 0x50   // 80
         #expect(Double(raw) - 40.0 == 40.0)
+    }
+
+    @Test func injectorPulse_scaledToMilliseconds() {
+        // Toyota enhanced 213C: injector pulse width = (256·C + D) / 1000 → ms, where C,D are the
+        // 3rd/4th data bytes after `61 3C` (the live, fuel-corrected field). 16-bit µs value.
+        // Idle sample (C=0F, D=A5): (256×15 + 165)/1000 = 4.005 ms
+        #expect(abs((Double(UInt8(0x0F)) * 256.0 + Double(UInt8(0xA5))) / 1000.0 - 4.005) < 0.0001)
+        // Under load (C=1E, D=CC): (256×30 + 204)/1000 = 7.884 ms
+        #expect(abs((Double(UInt8(0x1E)) * 256.0 + Double(UInt8(0xCC))) / 1000.0 - 7.884) < 0.0001)
     }
 
     @Test func fuelTrim_zeroAtMidpoint() {

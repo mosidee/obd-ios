@@ -4,12 +4,17 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Standard   : ATSH7E0 + 01 05 0C 11 06 07 04 — coolant/RPM/throttle/STFT/LTFT/engine load (SAE J1979 Mode-01)
-//    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
-//    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
+//    Standard   : 01 05 0C 11 06 07 04 — coolant/RPM/throttle/STFT/LTFT/engine load (SAE J1979 Mode-01)
+//    Injector   : 213C, (256·C + D) / 1000 → ms   (Toyota mode-21, PID 3C; 2nd 16-bit field)
+//    Inj. volume: 2137, (256·A + B) × 2.047 / 65535 → ml (Toyota mode-21, PID 37; multi-frame)
+//    Engine oil : 2151, payload[11] − 40 → °C      (Toyota mode-21, PID 51)
+//    ATF        : 2182, raw − 40 → °C              (Toyota mode-21, PID 82)
 //
-//  After all responses are handled, ATSH7DF is restored and the cycle repeats.
-//  (Engine oil and ATF have no standard Mode-01 equivalent on this ECU, so they stay enhanced.)
+//  The engine header (ATSH7E0) is established once per session and reused — the steady-state loop
+//  sends no AT commands and there is no per-cycle ATSH7DF restore, so a cycle is just the wait plus
+//  the five reads. Steps advance on the ELM327 `>` prompt (see `route`), not on response-receipt.
+//  (Injector, injection volume, engine oil, and ATF have no standard Mode-01 equivalent on this
+//  ECU, so they stay Toyota-enhanced.)
 
 import Foundation
 import Combine
@@ -18,9 +23,15 @@ private enum QueryState {
     case passive         // Waiting between active polling cycles
     case queryingEngineOil // Engine oil command sent; awaiting ECU response
     case queryingATF       // ATF command sent; awaiting ECU response
-    case restoringHeader   // Restoring normal functional request header before next cycle
+    case queryingInjectorPulse // Injector pulse-width command sent; awaiting ECU response
+    case queryingInjectionVolume // Injection-volume command sent; awaiting ECU response
     case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
     case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/load)
+}
+
+/// The next poll step to run, deferred until the ELM327 emits its `>` prompt (see `route`).
+private enum NextStep {
+    case injector, injectionVolume, engineOil, atf, endCycle
 }
 
 enum OBDLogDirection: String {
@@ -48,6 +59,8 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var engineSpeed: Double?      // RPM, standard PID 0C (256A+B)/4
     @Published private(set) var throttlePosition: Double? // %, standard PID 11 (A×100/255)
     @Published private(set) var engineLoad: Double?       // %, standard PID 04 (calculated engine load A×100/255)
+    @Published private(set) var injectorPulse: Double?    // ms, Toyota enhanced 213C ((256C+D)/1000, 2nd field)
+    @Published private(set) var injectionVolume: Double?  // ml, Toyota enhanced 2137 ((256A+B)×2.047/65535)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -81,18 +94,30 @@ final class OBDViewModel: ObservableObject {
     private var queryState: QueryState = .passive
     private var isInitializing = false
     private var listenModeActive = false   // Set at connect; drives the oil/ATF poll → monitor loop
+    private var engineHeaderActive = false // True while ATSH7E0 is the active request header; lets
+                                           // every active query skip a redundant ATCEA+ATSH7E0 re-send.
+                                           // In active mode it stays true across cycles (the loop sends
+                                           // no AT commands); a whole-cycle read failure clears it so the
+                                           // next cycle re-establishes the header (clone self-heal).
+    private var cycleGotData = false       // Did any read in the current active cycle succeed?
+    private var pendingNext: NextStep?     // Next poll step, deferred until the `>` prompt arrives
     private var parser = OBDParser()
 
     private let maxLogEntries = 120
     private let txRxFilePrefix = "obd_txrx_"   // + timestamp + ".txt", one file per connection
     private let dataLogFilePrefix = "obd_tune_" // + timestamp + ".csv", one file per connection
-    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant\n"
+    // InjectorPulse (213C) and InjectionVolume (2137) are sampled from separate frames polled
+    // earlier in the cycle than the standard frame that triggers each row, so they lag the
+    // standard values by about one poll cycle (each row holds the most recent reads at row time).
+    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant,InjectorPulse,InjectionVolume\n"
     private var sessionTimestamp: Date?         // Set at connect; both session filenames derive from it
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let disableExtendedAddressCommand = "ATCEA"
     private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header (also carries the ATF oil-pan sensor on 7E0/7E8)
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
     private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
+    private let injectorPulseCommand = "213C"     // Toyota mode 21, PID 3C — injector pulse width (ms)
+    private let injectionVolumeCommand = "2137"   // Toyota mode 21, PID 37 — injection volume (ml), multi-frame
 
     // Standard OBD-II Mode 01 — the active polling request for coolant/RPM/throttle/trims/load
     private let standardBatchCommand = "01 05 0C 11 06 07 04" // coolant, RPM, throttle, STFT, LTFT, engine load
@@ -133,6 +158,7 @@ final class OBDViewModel: ObservableObject {
         isInitializing = false
         listenModeActive = false
         queryState = .passive
+        pendingNext = nil
         bluetooth.disconnect()
         isConnected = false
         connectionStatus = "Disconnected"
@@ -183,6 +209,7 @@ final class OBDViewModel: ObservableObject {
         await cmd("ATSP6", delay: 500)  // Protocol 6: ISO 15765-4, CAN 11-bit, 500 kbps
         await cmd(disableExtendedAddressCommand)
         await cmd(defaultHeaderCommand)  // Default functional OBD-II request header
+        engineHeaderActive = false       // header is 7DF after init; first engine query sets 7E0
 
         isInitializing = false
         isConnected = true
@@ -218,6 +245,19 @@ final class OBDViewModel: ObservableObject {
         let line = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !line.isEmpty else { return }
 
+        // The `>` prompt means the adapter finished the previous command and is ready for the
+        // next. We chain on it (not on response-receipt): sending while the ELM327 is still in
+        // its post-response wait makes it abort the new command with "STOPPED" — a lost command
+        // that then stalls ~5 s on the watchdog. A parser sets `pendingNext` once its response is
+        // complete; firing it here paces the next request. (The watchdog is the fallback if no
+        // prompt arrives.) Prompts with no pending step — AT-command `OK`s, init — are ignored.
+        if line == ">" {
+            guard let next = pendingNext else { return }
+            pendingNext = nil
+            dispatch(next)
+            return
+        }
+
         switch queryState {
         case .passive:
             break   // Nothing is requested between cycles; ignore incoming lines.
@@ -228,16 +268,29 @@ final class OBDViewModel: ObservableObject {
         case .queryingATF:
             parseATFLine(line)
 
+        case .queryingInjectorPulse:
+            parseInjectorPulseLine(line)
+
+        case .queryingInjectionVolume:
+            parseInjectionVolumeLine(line)
+
         case .queryingStandard:
             parseStandardLine(line)
 
-        case .restoringHeader:
-            if line == ">" || line.hasSuffix(">") {
-                startPassiveMonitoring()
-            }
-
         case .listening:
             parseListeningLine(line)
+        }
+    }
+
+    /// Runs a `>`-gated poll step. Called from the prompt handler in `route` (the watchdog has its
+    /// own `queryState`-keyed fallback that advances directly, bypassing the prompt).
+    private func dispatch(_ step: NextStep) {
+        switch step {
+        case .injector:        beginInjectorPulseQuery()
+        case .injectionVolume: beginInjectionVolumeQuery()
+        case .engineOil:       beginEngineOilQuery()
+        case .atf:             beginATFQuery()
+        case .endCycle:        afterPollCycle()
         }
     }
 
@@ -250,7 +303,7 @@ final class OBDViewModel: ObservableObject {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
-            beginATFQuery()
+            pendingNext = .atf
             return
         }
 
@@ -259,7 +312,8 @@ final class OBDViewModel: ObservableObject {
            let raw = UInt8(payload[11], radix: 16) {
             engineOilTemp = Double(raw) - 40.0
             lastUpdate = Date()
-            beginATFQuery()
+            cycleGotData = true
+            pendingNext = .atf
             return
         }
 
@@ -267,10 +321,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameEngineOilLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginATFQuery() }
+        if isTerminalLine(line) { pendingNext = .atf }
     }
 
     // MARK: - Active Parser — ATF Temperature
@@ -283,12 +334,13 @@ final class OBDViewModel: ObservableObject {
         if let raw = OBDParser.rawByte(after: ["61", "82"], in: payload) {
             atfTemp = Double(raw) - 40.0
             lastUpdate = Date()
-            afterATFCycle()
+            cycleGotData = true
+            pendingNext = .endCycle
             return
         }
 
         if payload.first == "7F" {
-            afterATFCycle()
+            pendingNext = .endCycle
             return
         }
 
@@ -296,75 +348,137 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameATFLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { afterATFCycle() }
+        if isTerminalLine(line) { pendingNext = .endCycle }
     }
 
-    /// End of the oil/ATF poll. In listen mode, loop into the passive monitor window;
-    /// otherwise restore the functional header and resume normal active polling.
-    private func afterATFCycle() {
+    // MARK: - Active Parser — Injector Pulse Width
+
+    /// Parses Toyota mode-21 PID 3C from engine ECU 7E0 (7E8 responds). Polled first among the
+    /// enhanced reads — right after the standard frame — then chains to the injection-volume query.
+    /// Response: 7E8 07 61 3C A B C D E (single frame). Injector pulse width (ms) = (256·C + D) / 1000
+    /// — the *second* 16-bit field (3rd/4th data bytes after `61 3C`, a value in microseconds).
+    /// Determined from on-car captures and confirmed against Car Scanner: C·D is the live,
+    /// fuel-corrected value (wobbles at idle, rises under load); the first field A·B is a slow
+    /// staircase (an averaged/adapted value). (Injection *volume* is a separate PID, `2137`.)
+    private func parseInjectorPulseLine(_ line: String) {
+        let payload = parser.responsePayloadTokens(from: line)
+
+        if payload.count >= 6, payload[0] == "61", payload[1] == "3C",
+           let c = UInt8(payload[4], radix: 16), let d = UInt8(payload[5], radix: 16) {
+            injectorPulse = (Double(c) * 256.0 + Double(d)) / 1000.0
+            lastUpdate = Date()
+            cycleGotData = true
+            pendingNext = .injectionVolume
+            return
+        }
+
+        if payload.first == "7F" {
+            pendingNext = .injectionVolume
+            return
+        }
+
+        handleNonFrameInjectorPulseLine(line)
+    }
+
+    private func handleNonFrameInjectorPulseLine(_ line: String) {
+        if isTerminalLine(line) { pendingNext = .injectionVolume }
+    }
+
+    private func beginInjectorPulseQuery() {
+        sendEngineQuery(injectorPulseCommand, state: .queryingInjectorPulse,
+                        status: "Querying Injector Pulse...", resetParser: false)
+    }
+
+    // MARK: - Active Parser — Injection Volume
+
+    /// Parses Toyota mode-21 PID 37 from engine ECU 7E0 (7E8 responds) — multi-frame response
+    /// (declared length 0x11 = 17 bytes). Injection volume (ml) = (256·A + B) × 2.047 / 65535, the
+    /// first 16-bit field (data bytes after `61 37`). Confirmed against Car Scanner (~1.6 ml at
+    /// idle). Then chains to the engine-oil query.
+    private func parseInjectionVolumeLine(_ line: String) {
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
+
+        if payload.first == "7F" {
+            pendingNext = .engineOil
+            return
+        }
+
+        if payload.count >= 4, payload[0] == "61", payload[1] == "37",
+           let a = UInt8(payload[2], radix: 16), let b = UInt8(payload[3], radix: 16) {
+            injectionVolume = (Double(a) * 256.0 + Double(b)) * 2.047 / 65535.0
+            lastUpdate = Date()
+            cycleGotData = true
+            pendingNext = .engineOil
+            return
+        }
+
+        handleNonFrameInjectionVolumeLine(line)
+    }
+
+    private func handleNonFrameInjectionVolumeLine(_ line: String) {
+        if isTerminalLine(line) { pendingNext = .engineOil }
+    }
+
+    private func beginInjectionVolumeQuery() {
+        sendEngineQuery(injectionVolumeCommand, state: .queryingInjectionVolume,
+                        status: "Querying Injection Volume...", resetParser: true)
+    }
+
+    /// End of the injector/oil/ATF poll (ATF is the last enhanced read). In listen mode, loop into
+    /// the passive monitor window. In active mode, just schedule the next cycle — the `7E0` header
+    /// is left in place (no `ATSH7DF` restore) so the next cycle skips re-sending it; it's only
+    /// reset at connect (init sends `ATSH7DF`). If the whole cycle returned no data, clear the flag
+    /// so the next cycle re-establishes the header (recovers a clone that silently lost its config).
+    private func afterPollCycle() {
         if listenModeActive {
             beginListenWindow()
         } else {
-            returnToPassive()
+            if !cycleGotData { engineHeaderActive = false }
+            startPassiveMonitoring()
         }
     }
 
     private func beginEngineOilQuery() {
-        activeQueryTimeoutTask?.cancel()
-        parser.reset()
-        queryState = .queryingEngineOil
-        connectionStatus = "Querying Engine Oil Temp..."
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.sendCommand(self.disableExtendedAddressCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand(self.engineHeaderCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            guard self.queryState == .queryingEngineOil else { return }
-            self.sendCommand(self.engineOilCommand)
-            self.armActiveTimeout()
-        }
+        sendEngineQuery(engineOilCommand, state: .queryingEngineOil,
+                        status: "Querying Engine Oil Temp...", resetParser: true)
     }
 
     private func beginATFQuery() {
-        activeQueryTimeoutTask?.cancel()
-        queryState = .queryingATF
-        connectionStatus = "Querying ATF Temp..."
-        sendATFRequest()
+        sendEngineQuery(atfPrimaryCommand, state: .queryingATF,
+                        status: "Querying ATF Temp...", resetParser: false)
     }
 
-    private func sendATFRequest() {
+    /// Sends a request to the engine ECU (the standard Mode-01 batch or a mode-21 enhanced read),
+    /// re-establishing the `7E0` header (`ATCEA + ATSH7E0`, ~300 ms) **only if it isn't already
+    /// active**. The header is established once and reused: in active mode it persists across whole
+    /// cycles (the steady-state loop sends no AT commands, so nothing can change it) — the first
+    /// read of a session sets it, and it's only re-sent after a connect (init resets to `7DF`) or a
+    /// whole-cycle read failure (self-heal). In listen mode the first read of each cycle re-sets it
+    /// (the flag is cleared on entering the monitor window, which toggles CAF/ATMA). The flag is set
+    /// inside the Task right after `ATSH7E0` is sent, so it reflects the adapter's actual state.
+    private func sendEngineQuery(_ command: String, state: QueryState,
+                                 status: String, resetParser: Bool) {
         activeQueryTimeoutTask?.cancel()
+        if resetParser { parser.reset() }
+        queryState = state
+        connectionStatus = status
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.sendCommand(self.disableExtendedAddressCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand(self.engineHeaderCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            guard self.queryState == .queryingATF else { return }
-            self.sendCommand(self.atfPrimaryCommand)
+            if !self.engineHeaderActive {
+                self.sendCommand(self.disableExtendedAddressCommand)
+                try? await Task.sleep(for: .milliseconds(150))
+                self.sendCommand(self.engineHeaderCommand)
+                try? await Task.sleep(for: .milliseconds(150))
+                self.engineHeaderActive = true   // header now established on the adapter
+            }
+            guard self.queryState == state else { return }
+            self.sendCommand(command)
             self.armActiveTimeout()
-        }
-    }
-
-    private func returnToPassive() {
-        activeQueryTimeoutTask?.cancel()
-        queryState = .restoringHeader
-        connectionStatus = "Restoring OBD Header..."
-        sendCommand(disableExtendedAddressCommand)
-        sendCommand(defaultHeaderCommand)
-
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(150))
-            guard let self, self.queryState == .restoringHeader else { return }
-            self.startPassiveMonitoring()
         }
     }
 
     private func startPassiveMonitoring() {
+        activeQueryTimeoutTask?.cancel()   // the ATF read's watchdog (this path skips sendEngineQuery)
         queryState = .passive
         connectionStatus = "Active Polling"
         scheduleNextActiveQuery()
@@ -394,18 +508,19 @@ final class OBDViewModel: ObservableObject {
             self.sendCommand("ATCF7E8")  // CAN filter: accept only 7E8 (engine ECU responses)
             try? await Task.sleep(for: .milliseconds(150))
             guard self.listenModeActive else { return }
-            self.beginEngineOilQuery()   // poll oil → ATF → monitor window → repeat
+            self.beginInjectorPulseQuery()   // poll injector → oil → ATF → monitor window → repeat
         }
     }
 
     /// Passively monitors the bus for one polling interval, capturing standard Mode-01
-    /// responses, then stops and re-polls oil/ATF. ATMA needs CAN auto-formatting off so the
-    /// raw ISO-TP frames reach OBDParser.
+    /// responses, then stops and re-polls injector/oil/ATF. ATMA needs CAN auto-formatting off so
+    /// the raw ISO-TP frames reach OBDParser.
     private func beginListenWindow() {
         activeQueryTimeoutTask?.cancel()
         parser.reset()
         queryState = .listening
         connectionStatus = "Listen-Only (monitoring)"
+        engineHeaderActive = false   // re-establish 7E0 once per listen cycle (clone safety)
         pollTimerTask?.cancel()
         pollTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -413,15 +528,13 @@ final class OBDViewModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled, self.queryState == .listening else { return }
             self.sendCommand("ATMA")     // Monitor All (subject to the 7E8 filter)
-            let stored = UserDefaults.standard.double(forKey: "pollingDelay")
-            let window = stored > 0 ? stored : 1.0
-            try? await Task.sleep(for: .seconds(window))
+            try? await Task.sleep(for: .seconds(self.pollingDelaySeconds))
             guard !Task.isCancelled, self.queryState == .listening else { return }
             self.exitMonitorThenPoll()
         }
     }
 
-    /// Stops ATMA, re-enables CAN auto-formatting, then resumes the oil/ATF poll.
+    /// Stops ATMA, re-enables CAN auto-formatting, then resumes the injector/oil/ATF poll.
     ///
     /// NOTE (the one part unverified on this adapter): a leading space stops the monitor — the
     /// ELM327 discards the triggering byte — while the rest of the same line (`ATCAF1`) restores
@@ -435,7 +548,7 @@ final class OBDViewModel: ObservableObject {
             self.sendCommand(" ATCAF1")  // space stops ATMA; ATCAF1 restores auto-formatting
             try? await Task.sleep(for: .milliseconds(200))
             guard self.listenModeActive else { return }
-            self.beginEngineOilQuery()   // back to polling oil → ATF
+            self.beginInjectorPulseQuery()   // back to polling injector → oil → ATF
         }
     }
 
@@ -462,29 +575,17 @@ final class OBDViewModel: ObservableObject {
     /// Sends a single multi-PID Mode-01 request to the engine ECU for coolant, RPM,
     /// throttle, and fuel trims; the response is decoded by `parseStandardLine`.
     private func beginStandardQuery() {
-        activeQueryTimeoutTask?.cancel()
-        parser.reset()
-        queryState = .queryingStandard
-        connectionStatus = "Querying Standard PIDs..."
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.sendCommand(self.disableExtendedAddressCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            self.sendCommand(self.engineHeaderCommand)
-            try? await Task.sleep(for: .milliseconds(150))
-            guard self.queryState == .queryingStandard else { return }
-            self.sendCommand(self.standardBatchCommand)
-            self.armActiveTimeout()
-        }
+        sendEngineQuery(standardBatchCommand, state: .queryingStandard,
+                        status: "Querying Standard PIDs...", resetParser: true)
     }
 
     /// Decodes the multi-PID Mode-01 response (`41 05 .. 0C .. .. 11 .. 06 .. 07 ..`).
-    /// Chains to the enhanced engine-oil query (2151); oil and ATF stay enhanced.
+    /// Chains to the enhanced injector-pulse query (213C), then oil → ATF.
     private func parseStandardLine(_ line: String) {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
-            beginEngineOilQuery()
+            pendingNext = .injector
             return
         }
 
@@ -497,8 +598,9 @@ final class OBDViewModel: ObservableObject {
             if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
             if let v = values["04"] { engineLoad = Double(v[0]) * 100.0 / 255.0 }
             lastUpdate = Date()
+            cycleGotData = true
             logTuningSample()
-            beginEngineOilQuery()
+            pendingNext = .injector
             return
         }
 
@@ -506,21 +608,36 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameStandardLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginEngineOilQuery() }
+        if isTerminalLine(line) { pendingNext = .injector }
+    }
+
+    /// A line that ends the current step without a usable payload: an ECU "NO DATA"/error, or an
+    /// adapter "STOPPED" (a command aborted mid-flight). Treated as a skip — advance after the
+    /// `>` prompt rather than stalling on the 5 s watchdog. `STOPPED` shouldn't occur now that
+    /// chaining is prompt-gated, but recovers fast if it ever does.
+    private func isTerminalLine(_ line: String) -> Bool {
+        line.contains("NO DATA")
+            || line.contains("ERROR")
+            || line.contains("UNABLE TO CONNECT")
+            || line.contains("STOPPED")
     }
 
     // MARK: - Active Query Scheduling
+
+    /// Seconds between active cycles (also the listen-mode monitor-window length). `0` is a valid
+    /// user choice (poll as fast as possible / negligible monitor window); the `1.0` default
+    /// applies only when the setting was never written — `double(forKey:)` returns 0 for both an
+    /// unset key and an explicit 0, so the existence check is what tells them apart.
+    private var pollingDelaySeconds: Double {
+        guard UserDefaults.standard.object(forKey: "pollingDelay") != nil else { return 1.0 }
+        return max(0, UserDefaults.standard.double(forKey: "pollingDelay"))
+    }
 
     private func scheduleNextActiveQuery() {
         pollTimerTask?.cancel()
         pollTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let stored = UserDefaults.standard.double(forKey: "pollingDelay")
-            let delay = stored > 0 ? stored : 1.0
-            try? await Task.sleep(for: .seconds(delay))
+            try? await Task.sleep(for: .seconds(self.pollingDelaySeconds))
             guard !Task.isCancelled else { return }
             self.triggerActiveQuery()
         }
@@ -531,7 +648,8 @@ final class OBDViewModel: ObservableObject {
             scheduleNextActiveQuery()  // Back off and retry later
             return
         }
-        beginStandardQuery()           // Standard Mode-01 PIDs → enhanced oil → enhanced ATF
+        cycleGotData = false           // reset the per-cycle read tracker (drives header self-heal)
+        beginStandardQuery()           // Standard Mode-01 PIDs → enhanced injector → oil → ATF
     }
 
     // MARK: - Communication Log
@@ -622,6 +740,8 @@ final class OBDViewModel: ObservableObject {
             Self.csvField(throttlePosition, decimals: 1),
             Self.csvField(engineLoad, decimals: 1),
             Self.csvField(coolantTemp, decimals: 1),
+            Self.csvField(injectorPulse, decimals: 2),
+            Self.csvField(injectionVolume, decimals: 3),
         ].joined(separator: ",") + "\n"
 
         guard let data = row.data(using: .utf8) else { return }
@@ -715,6 +835,8 @@ final class OBDViewModel: ObservableObject {
         vm.engineSpeed       = 736.0
         vm.throttlePosition  = 14.5
         vm.engineLoad        = 28.0
+        vm.injectorPulse     = 2.9
+        vm.injectionVolume   = 1.6
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()
@@ -724,21 +846,28 @@ final class OBDViewModel: ObservableObject {
     }
 #endif
 
-    /// Safety net: if an active query gets no response, advance or reset after 5 s.
+    /// Safety net: if an active query gets no response (or its `>` prompt never arrives), advance
+    /// after 5 s. This is the fallback for the prompt-gated chain — it advances directly, and
+    /// clears any `pendingNext` first so a late prompt can't fire the same step twice.
     private func armActiveTimeout() {
         activeQueryTimeoutTask?.cancel()
         activeQueryTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self else { return }
 
+            self.pendingNext = nil
             switch self.queryState {
             case .queryingStandard:
+                self.beginInjectorPulseQuery()
+            case .queryingInjectorPulse:
+                self.beginInjectionVolumeQuery()
+            case .queryingInjectionVolume:
                 self.beginEngineOilQuery()
             case .queryingEngineOil:
                 self.beginATFQuery()
             case .queryingATF:
-                self.afterATFCycle()
-            case .passive, .restoringHeader, .listening:
+                self.afterPollCycle()
+            case .passive, .listening:
                 break
             }
         }

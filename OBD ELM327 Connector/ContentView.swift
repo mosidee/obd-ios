@@ -181,7 +181,7 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Engine Card (RPM / load / throttle, standard Mode-01 PIDs)
+    // MARK: - Engine Card (RPM + load from standard Mode-01; injector pulse 213C / injection volume 2137)
 
     private var engineCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -192,7 +192,9 @@ struct ContentView: View {
                 Divider().frame(height: 60)
                 engineCell(label: "Load", value: viewModel.engineLoad, format: "%.1f", unit: "%")
                 Divider().frame(height: 60)
-                engineCell(label: "Throttle", value: viewModel.throttlePosition, format: "%.1f", unit: "%")
+                engineCell(label: "Injector", value: viewModel.injectorPulse, format: "%.1f", unit: "ms")
+                Divider().frame(height: 60)
+                engineCell(label: "Inj Vol", value: viewModel.injectionVolume, format: "%.2f", unit: "ml")
             }
         }
         .padding()
@@ -470,7 +472,7 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                         }
-                        Slider(value: $pollingDelay, in: 0.5...10.0, step: 0.5)
+                        Slider(value: $pollingDelay, in: 0.0...10.0, step: 0.1)
                     }
                     .padding(.vertical, 4)
                 }
@@ -488,7 +490,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Data Logging records STFT, LTFT, RPM, Throttle, Engine Load and Coolant with timestamps to a CSV you can share via AirDrop for tuning.")
+                    Text("Data Logging records STFT, LTFT, RPM, Throttle, Engine Load, Coolant, Injector Pulse and Injection Volume with timestamps to a CSV you can share via AirDrop for tuning.")
                 }
             }
             .navigationTitle("Settings")
