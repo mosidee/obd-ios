@@ -127,15 +127,6 @@ final class OBDViewModel: ObservableObject {
         bluetooth.startScanning()
     }
 
-    func savedLogText() -> String {
-        guard let url = currentTxRxFileURL else { return "" }
-        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-    }
-
-    func clearSavedLog() {
-        communicationLog.removeAll()
-    }
-
     func disconnect() {
         pollTimerTask?.cancel()
         activeQueryTimeoutTask?.cancel()

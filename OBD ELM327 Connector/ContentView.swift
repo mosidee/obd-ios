@@ -270,17 +270,31 @@ struct ContentView: View {
                 Label("TX / RX Log", systemImage: "terminal")
                     .font(.headline)
                 Spacer()
-                Text("\(viewModel.communicationLog.count)")
+                Text("\(viewModel.communicationLog.count) rows")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
-            logFileControls
+            Label(viewModel.logFileName ?? "No file yet", systemImage: "doc.text")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
             if let error = viewModel.logFileError {
                 Text("Log file error: \(error)")
                     .font(.caption2)
                     .foregroundStyle(.red)
+            }
+
+            if let url = viewModel.currentTxRxFileURL {
+                ShareLink(item: url) {
+                    Label("Share / AirDrop", systemImage: "square.and.arrow.up")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
             }
 
             if viewModel.communicationLog.isEmpty {
@@ -312,34 +326,6 @@ struct ContentView: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var logFileControls: some View {
-        HStack(spacing: 8) {
-            Label(viewModel.logFileName ?? "No file yet", systemImage: "doc.text")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer()
-
-            Button {
-                UIPasteboard.general.string = viewModel.savedLogText()
-            } label: {
-                Image(systemName: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Copy saved log")
-
-            Button(role: .destructive) {
-                viewModel.clearSavedLog()
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Clear saved log")
-        }
     }
 
     private func communicationLogRow(_ entry: OBDCommunicationLogEntry) -> some View {
