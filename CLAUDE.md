@@ -113,9 +113,14 @@ let stored = UserDefaults.standard.double(forKey: "pollingDelay")
 let delay = stored > 0 ? stored : 1.0   // seconds between cycles
 ```
 
-## TX/RX Logging
+## Logging (TX/RX + Tuning CSV)
 
-When the `loggingEnabled` setting is on, every sent command and received line is appended to the in-memory `communicationLog` (capped at `maxLogEntries = 120`) and to a `obd_tx_rx_log.txt` file in the Documents directory. The log card in `ContentView` shows the live tail with copy/clear controls. When logging is off, `appendLog` returns early and nothing is recorded.
+Two independent logs, each gated by its own `@AppStorage` toggle, both written to the Documents directory as **one timestamped file per connection** (created lazily on the first write of a session, so a session with the toggle off leaves no file). A single `sessionTimestamp` captured in `connect()` names both files for that connection:
+
+- **TX/RX diagnostic log** (`loggingEnabled`): every sent command and received line is appended to the in-memory `communicationLog` (capped at `maxLogEntries = 120`) and to `obd_txrx_<yyyy-MM-dd_HH-mm-ss>.txt`. The log card in `ContentView` shows the live tail with copy/clear; "clear" now only empties the on-screen `communicationLog` (file deletion lives in the manager). When the toggle is off, `appendLog` returns early.
+- **Tuning CSV** (`dataLoggingEnabled`): one row per decoded standard Mode-01 frame — `timestamp,STFT,LTFT,RPM,Throttle,Pedal,Coolant` (all sampled from the same frame) — written via `logTuningSample()` in both `parseStandardLine` and `parseListeningLine` to `obd_tune_<yyyy-MM-dd_HH-mm-ss>.csv`. The Tuning Data Log card shows the row count and a `ShareLink` (AirDrop) to the current session file.
+
+`currentTxRxFileURL` / `currentDataLogFileURL` are published optionals pointing at the active-session files (nil until the first write). `OBDViewModel.savedLogFiles()` lists all `obd_txrx_*`/`obd_tune_*` files (newest first) and `deleteLogFiles(_:)` removes them. `LogManagerView` (a sheet opened from the folder toolbar button, always reachable regardless of toggles) presents the saved files with a selection mode — Select All / Deselect All, then Share (AirDrop the selected set) or Delete.
 
 ## On-car Verification Status
 
