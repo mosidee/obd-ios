@@ -19,13 +19,14 @@ private enum QueryState {
     case queryingEngineOil // Engine oil command sent; awaiting ECU response
     case queryingATF       // ATF command sent; awaiting ECU response
     case queryingInjectorPulse // Injector pulse-width command sent; awaiting ECU response
+    case queryingInjectionVolume // Injection-volume command sent; awaiting ECU response
     case listening         // Listen-Only: passively monitoring the CAN bus (CAF0 + ATMA)
     case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/load)
 }
 
 /// The next poll step to run, deferred until the ELM327 emits its `>` prompt (see `route`).
 private enum NextStep {
-    case injector, engineOil, atf, endCycle
+    case injector, injectionVolume, engineOil, atf, endCycle
 }
 
 enum OBDLogDirection: String {
@@ -54,6 +55,7 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var throttlePosition: Double? // %, standard PID 11 (A×100/255)
     @Published private(set) var engineLoad: Double?       // %, standard PID 04 (calculated engine load A×100/255)
     @Published private(set) var injectorPulse: Double?    // ms, Toyota enhanced 213C ((256C+D)/1000, 2nd field)
+    @Published private(set) var injectionVolume: Double?  // ml, Toyota enhanced 2137 ((256A+B)×2.047/65535)
     @Published private(set) var connectionStatus: String = "Disconnected"
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var lastUpdate: Date?
@@ -99,10 +101,10 @@ final class OBDViewModel: ObservableObject {
     private let maxLogEntries = 120
     private let txRxFilePrefix = "obd_txrx_"   // + timestamp + ".txt", one file per connection
     private let dataLogFilePrefix = "obd_tune_" // + timestamp + ".csv", one file per connection
-    // InjectorPulse is sampled from a separate 213C frame polled earlier in the cycle than the
-    // standard frame that triggers each row, so it lags the standard values by about one poll
-    // cycle (each row holds the most recent injector read at row time).
-    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant,InjectorPulse\n"
+    // InjectorPulse (213C) and InjectionVolume (2137) are sampled from separate frames polled
+    // earlier in the cycle than the standard frame that triggers each row, so they lag the
+    // standard values by about one poll cycle (each row holds the most recent reads at row time).
+    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant,InjectorPulse,InjectionVolume\n"
     private var sessionTimestamp: Date?         // Set at connect; both session filenames derive from it
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let disableExtendedAddressCommand = "ATCEA"
@@ -110,6 +112,7 @@ final class OBDViewModel: ObservableObject {
     private let engineOilCommand = "2151"        // Toyota mode 21, PID 51 — TOYOTA_EOT at bix 72 (data byte 9)
     private let atfPrimaryCommand    = "2182"     // Toyota mode 21, PID 82 — ATF oil pan sensor
     private let injectorPulseCommand = "213C"     // Toyota mode 21, PID 3C — injector pulse width (ms)
+    private let injectionVolumeCommand = "2137"   // Toyota mode 21, PID 37 — injection volume (ml), multi-frame
 
     // Standard OBD-II Mode 01 — the active polling request for coolant/RPM/throttle/trims/load
     private let standardBatchCommand = "01 05 0C 11 06 07 04" // coolant, RPM, throttle, STFT, LTFT, engine load
@@ -263,6 +266,9 @@ final class OBDViewModel: ObservableObject {
         case .queryingInjectorPulse:
             parseInjectorPulseLine(line)
 
+        case .queryingInjectionVolume:
+            parseInjectionVolumeLine(line)
+
         case .queryingStandard:
             parseStandardLine(line)
 
@@ -275,10 +281,11 @@ final class OBDViewModel: ObservableObject {
     /// own `queryState`-keyed fallback that advances directly, bypassing the prompt).
     private func dispatch(_ step: NextStep) {
         switch step {
-        case .injector:  beginInjectorPulseQuery()
-        case .engineOil: beginEngineOilQuery()
-        case .atf:       beginATFQuery()
-        case .endCycle:  afterPollCycle()
+        case .injector:        beginInjectorPulseQuery()
+        case .injectionVolume: beginInjectionVolumeQuery()
+        case .engineOil:       beginEngineOilQuery()
+        case .atf:             beginATFQuery()
+        case .endCycle:        afterPollCycle()
         }
     }
 
@@ -342,12 +349,12 @@ final class OBDViewModel: ObservableObject {
     // MARK: - Active Parser — Injector Pulse Width
 
     /// Parses Toyota mode-21 PID 3C from engine ECU 7E0 (7E8 responds). Polled first among the
-    /// enhanced reads — right after the standard frame — then chains to the engine-oil query.
+    /// enhanced reads — right after the standard frame — then chains to the injection-volume query.
     /// Response: 7E8 07 61 3C A B C D E (single frame). Injector pulse width (ms) = (256·C + D) / 1000
     /// — the *second* 16-bit field (3rd/4th data bytes after `61 3C`, a value in microseconds).
-    /// Determined from on-car captures: C·D is the live, fuel-corrected value (wobbles at idle,
-    /// rises to ~7.9 ms under load), whereas the first field A·B is a slow staircase (an averaged/
-    /// adapted value, ~constant under load). Matches Car Scanner's ms reading (~4 ms at idle).
+    /// Determined from on-car captures and confirmed against Car Scanner: C·D is the live,
+    /// fuel-corrected value (wobbles at idle, rises under load); the first field A·B is a slow
+    /// staircase (an averaged/adapted value). (Injection *volume* is a separate PID, `2137`.)
     private func parseInjectorPulseLine(_ line: String) {
         let payload = parser.responsePayloadTokens(from: line)
 
@@ -356,12 +363,12 @@ final class OBDViewModel: ObservableObject {
             injectorPulse = (Double(c) * 256.0 + Double(d)) / 1000.0
             lastUpdate = Date()
             cycleGotData = true
-            pendingNext = .engineOil
+            pendingNext = .injectionVolume
             return
         }
 
         if payload.first == "7F" {
-            pendingNext = .engineOil
+            pendingNext = .injectionVolume
             return
         }
 
@@ -369,12 +376,47 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameInjectorPulseLine(_ line: String) {
-        if isTerminalLine(line) { pendingNext = .engineOil }
+        if isTerminalLine(line) { pendingNext = .injectionVolume }
     }
 
     private func beginInjectorPulseQuery() {
         sendEngineQuery(injectorPulseCommand, state: .queryingInjectorPulse,
                         status: "Querying Injector Pulse...", resetParser: false)
+    }
+
+    // MARK: - Active Parser — Injection Volume
+
+    /// Parses Toyota mode-21 PID 37 from engine ECU 7E0 (7E8 responds) — multi-frame response
+    /// (declared length 0x11 = 17 bytes). Injection volume (ml) = (256·A + B) × 2.047 / 65535, the
+    /// first 16-bit field (data bytes after `61 37`). Confirmed against Car Scanner (~1.6 ml at
+    /// idle). Then chains to the engine-oil query.
+    private func parseInjectionVolumeLine(_ line: String) {
+        guard let payload = parser.completePayloadTokens(from: line) else { return }
+
+        if payload.first == "7F" {
+            pendingNext = .engineOil
+            return
+        }
+
+        if payload.count >= 4, payload[0] == "61", payload[1] == "37",
+           let a = UInt8(payload[2], radix: 16), let b = UInt8(payload[3], radix: 16) {
+            injectionVolume = (Double(a) * 256.0 + Double(b)) * 2.047 / 65535.0
+            lastUpdate = Date()
+            cycleGotData = true
+            pendingNext = .engineOil
+            return
+        }
+
+        handleNonFrameInjectionVolumeLine(line)
+    }
+
+    private func handleNonFrameInjectionVolumeLine(_ line: String) {
+        if isTerminalLine(line) { pendingNext = .engineOil }
+    }
+
+    private func beginInjectionVolumeQuery() {
+        sendEngineQuery(injectionVolumeCommand, state: .queryingInjectionVolume,
+                        status: "Querying Injection Volume...", resetParser: true)
     }
 
     /// End of the injector/oil/ATF poll (ATF is the last enhanced read). In listen mode, loop into
@@ -694,6 +736,7 @@ final class OBDViewModel: ObservableObject {
             Self.csvField(engineLoad, decimals: 1),
             Self.csvField(coolantTemp, decimals: 1),
             Self.csvField(injectorPulse, decimals: 2),
+            Self.csvField(injectionVolume, decimals: 3),
         ].joined(separator: ",") + "\n"
 
         guard let data = row.data(using: .utf8) else { return }
@@ -787,7 +830,8 @@ final class OBDViewModel: ObservableObject {
         vm.engineSpeed       = 736.0
         vm.throttlePosition  = 14.5
         vm.engineLoad        = 28.0
-        vm.injectorPulse     = 4.1
+        vm.injectorPulse     = 2.9
+        vm.injectionVolume   = 1.6
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()
@@ -811,6 +855,8 @@ final class OBDViewModel: ObservableObject {
             case .queryingStandard:
                 self.beginInjectorPulseQuery()
             case .queryingInjectorPulse:
+                self.beginInjectionVolumeQuery()
+            case .queryingInjectionVolume:
                 self.beginEngineOilQuery()
             case .queryingEngineOil:
                 self.beginATFQuery()
