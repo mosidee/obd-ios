@@ -108,6 +108,13 @@ struct ResponsePayloadTokensTests {
         #expect(tokens == ["61", "82", "50"])
     }
 
+    @Test func injectorPulse_stripsCanIdAndLength() {
+        // Injector pulse response: 7E8 07 61 3C 0F E9 10 16 69 → strips 7E8 (CAN ID) and 07 (length)
+        let p = OBDParser()
+        let tokens = p.responsePayloadTokens(from: "7E8 07 61 3C 0F E9 10 16 69")
+        #expect(tokens == ["61", "3C", "0F", "E9", "10", "16", "69"])
+    }
+
     @Test func stripsExtendedAddressByte() {
         // Extended-address frame: 7E8 18 05 62 DA 12 7B → strips 7E8, 18, 05
         let p = OBDParser()
@@ -183,6 +190,15 @@ struct ValueFormulaTests {
     @Test func atfTemp_rawMinusForty() {
         let raw: UInt8 = 0x50   // 80
         #expect(Double(raw) - 40.0 == 40.0)
+    }
+
+    @Test func injectorPulse_scaledToMilliseconds() {
+        // Toyota enhanced 213C: injector pulse width = (256·C + D) / 1000 → ms, where C,D are the
+        // 3rd/4th data bytes after `61 3C` (the live, fuel-corrected field). 16-bit µs value.
+        // Idle sample (C=0F, D=A5): (256×15 + 165)/1000 = 4.005 ms
+        #expect(abs((Double(UInt8(0x0F)) * 256.0 + Double(UInt8(0xA5))) / 1000.0 - 4.005) < 0.0001)
+        // Under load (C=1E, D=CC): (256×30 + 204)/1000 = 7.884 ms
+        #expect(abs((Double(UInt8(0x1E)) * 256.0 + Double(UInt8(0xCC))) / 1000.0 - 7.884) < 0.0001)
     }
 
     @Test func fuelTrim_zeroAtMidpoint() {
