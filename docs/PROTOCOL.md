@@ -116,9 +116,14 @@ loop, one cycle per pollingDelay (default 1.0 s):
    (no header restore — 7E0 persists; → wait pollingDelay → STEP 1)
 ```
 
+**Wait for the `>` prompt between steps.** Each step advances only after the ELM327 emits its
+`>` ready-prompt — *not* the instant the response bytes arrive. Sending the next command while
+the adapter is still in its inter-response wait makes it abort the new command with `STOPPED`
+(a lost command → 5 s watchdog stall). So: send → read response → **wait for `>`** → next step.
+
 **Error/NRC handling at every step:** if the response is `7F` (negative response code), or
-contains `NO DATA` / `ERROR` / `UNABLE TO CONNECT`, **skip to the next step anyway**. A
-**5-second watchdog** per step auto-advances if nothing arrives.
+contains `NO DATA` / `ERROR` / `UNABLE TO CONNECT` / `STOPPED`, **skip to the next step** (still
+after the `>`). A **5-second watchdog** per step auto-advances if nothing arrives at all.
 
 **Why the header is set only once:** `ATSH7E0` stays the active request header until something
 changes it — and nothing in the loop does (the standard batch is requested on `7E0`, not the
@@ -237,9 +242,10 @@ corrupt earlier values. Length map: `{05:1, 0C:2, 11:1, 06:1, 07:1, 04:1}`.
   Matches Car Scanner's ms display. The `/1000` divisor is a best fit to an idle reading —
   cross-check against a known Car Scanner value, and confirm the field by revving. (`21F3` was the
   wrong guess: `7F 21 12`, not supported.)
-- **`STOPPED` / pacing (open):** sending the next command on response-receipt (not on `>`) can
-  race the ELM327's inter-response wait and get the command aborted (`STOPPED`) → 5 s watchdog
-  stutter. Seen for the first few cycles, then settled. Fix: gate sends on `>`, or append an
-  expected-response count to each request so `>` arrives immediately.
+- **`STOPPED` / pacing (fix applied, unverified on device):** sending the next command on
+  response-receipt (not on `>`) raced the ELM327's inter-response wait and got the command
+  aborted (`STOPPED`) → 5 s watchdog stutter (seen for the first few cycles, then settled). Now
+  fixed by gating each step on the `>` prompt; a stray `STOPPED` is also treated as a fast skip.
+  Needs an on-car run to confirm.
 - The `" ATCAF1"` ATMA-stop trick is the one adapter-dependent behaviour still to verify (the
   on-car capture was active mode only).

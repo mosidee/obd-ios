@@ -23,6 +23,11 @@ private enum QueryState {
     case queryingStandard    // Multi-PID Mode-01 request (coolant/RPM/throttle/trims/load)
 }
 
+/// The next poll step to run, deferred until the ELM327 emits its `>` prompt (see `route`).
+private enum NextStep {
+    case injector, engineOil, atf, endCycle
+}
+
 enum OBDLogDirection: String {
     case sent = "TX"
     case received = "RX"
@@ -88,6 +93,7 @@ final class OBDViewModel: ObservableObject {
                                            // no AT commands); a whole-cycle read failure clears it so the
                                            // next cycle re-establishes the header (clone self-heal).
     private var cycleGotData = false       // Did any read in the current active cycle succeed?
+    private var pendingNext: NextStep?     // Next poll step, deferred until the `>` prompt arrives
     private var parser = OBDParser()
 
     private let maxLogEntries = 120
@@ -144,6 +150,7 @@ final class OBDViewModel: ObservableObject {
         isInitializing = false
         listenModeActive = false
         queryState = .passive
+        pendingNext = nil
         bluetooth.disconnect()
         isConnected = false
         connectionStatus = "Disconnected"
@@ -230,6 +237,19 @@ final class OBDViewModel: ObservableObject {
         let line = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !line.isEmpty else { return }
 
+        // The `>` prompt means the adapter finished the previous command and is ready for the
+        // next. We chain on it (not on response-receipt): sending while the ELM327 is still in
+        // its post-response wait makes it abort the new command with "STOPPED" — a lost command
+        // that then stalls ~5 s on the watchdog. A parser sets `pendingNext` once its response is
+        // complete; firing it here paces the next request. (The watchdog is the fallback if no
+        // prompt arrives.) Prompts with no pending step — AT-command `OK`s, init — are ignored.
+        if line == ">" {
+            guard let next = pendingNext else { return }
+            pendingNext = nil
+            dispatch(next)
+            return
+        }
+
         switch queryState {
         case .passive:
             break   // Nothing is requested between cycles; ignore incoming lines.
@@ -251,6 +271,17 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
+    /// Runs a `>`-gated poll step. Called from the prompt handler in `route` (the watchdog has its
+    /// own `queryState`-keyed fallback that advances directly, bypassing the prompt).
+    private func dispatch(_ step: NextStep) {
+        switch step {
+        case .injector:  beginInjectorPulseQuery()
+        case .engineOil: beginEngineOilQuery()
+        case .atf:       beginATFQuery()
+        case .endCycle:  afterPollCycle()
+        }
+    }
+
     // MARK: - Active Parser — Engine Oil Temperature
 
     /// Parses Toyota mode-21 PID 51 from engine ECU 7E0 (7E8 responds) — multi-frame response.
@@ -260,7 +291,7 @@ final class OBDViewModel: ObservableObject {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
-            beginATFQuery()
+            pendingNext = .atf
             return
         }
 
@@ -270,7 +301,7 @@ final class OBDViewModel: ObservableObject {
             engineOilTemp = Double(raw) - 40.0
             lastUpdate = Date()
             cycleGotData = true
-            beginATFQuery()
+            pendingNext = .atf
             return
         }
 
@@ -278,10 +309,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameEngineOilLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginATFQuery() }
+        if isTerminalLine(line) { pendingNext = .atf }
     }
 
     // MARK: - Active Parser — ATF Temperature
@@ -295,12 +323,12 @@ final class OBDViewModel: ObservableObject {
             atfTemp = Double(raw) - 40.0
             lastUpdate = Date()
             cycleGotData = true
-            afterPollCycle()
+            pendingNext = .endCycle
             return
         }
 
         if payload.first == "7F" {
-            afterPollCycle()
+            pendingNext = .endCycle
             return
         }
 
@@ -308,10 +336,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameATFLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { afterPollCycle() }
+        if isTerminalLine(line) { pendingNext = .endCycle }
     }
 
     // MARK: - Active Parser — Injector Pulse Width
@@ -331,12 +356,12 @@ final class OBDViewModel: ObservableObject {
             injectorPulse = (Double(c) * 256.0 + Double(d)) / 1000.0
             lastUpdate = Date()
             cycleGotData = true
-            beginEngineOilQuery()
+            pendingNext = .engineOil
             return
         }
 
         if payload.first == "7F" {
-            beginEngineOilQuery()
+            pendingNext = .engineOil
             return
         }
 
@@ -344,10 +369,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameInjectorPulseLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginEngineOilQuery() }
+        if isTerminalLine(line) { pendingNext = .engineOil }
     }
 
     private func beginInjectorPulseQuery() {
@@ -409,6 +431,7 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func startPassiveMonitoring() {
+        activeQueryTimeoutTask?.cancel()   // the ATF read's watchdog (this path skips sendEngineQuery)
         queryState = .passive
         connectionStatus = "Active Polling"
         scheduleNextActiveQuery()
@@ -515,7 +538,7 @@ final class OBDViewModel: ObservableObject {
         guard let payload = parser.completePayloadTokens(from: line) else { return }
 
         if payload.first == "7F" {
-            beginInjectorPulseQuery()
+            pendingNext = .injector
             return
         }
 
@@ -530,7 +553,7 @@ final class OBDViewModel: ObservableObject {
             lastUpdate = Date()
             cycleGotData = true
             logTuningSample()
-            beginInjectorPulseQuery()
+            pendingNext = .injector
             return
         }
 
@@ -538,10 +561,18 @@ final class OBDViewModel: ObservableObject {
     }
 
     private func handleNonFrameStandardLine(_ line: String) {
-        let isTerminal = line.contains("NO DATA")
-                      || line.contains("ERROR")
-                      || line.contains("UNABLE TO CONNECT")
-        if isTerminal { beginInjectorPulseQuery() }
+        if isTerminalLine(line) { pendingNext = .injector }
+    }
+
+    /// A line that ends the current step without a usable payload: an ECU "NO DATA"/error, or an
+    /// adapter "STOPPED" (a command aborted mid-flight). Treated as a skip — advance after the
+    /// `>` prompt rather than stalling on the 5 s watchdog. `STOPPED` shouldn't occur now that
+    /// chaining is prompt-gated, but recovers fast if it ever does.
+    private func isTerminalLine(_ line: String) -> Bool {
+        line.contains("NO DATA")
+            || line.contains("ERROR")
+            || line.contains("UNABLE TO CONNECT")
+            || line.contains("STOPPED")
     }
 
     // MARK: - Active Query Scheduling
@@ -766,13 +797,16 @@ final class OBDViewModel: ObservableObject {
     }
 #endif
 
-    /// Safety net: if an active query gets no response, advance or reset after 5 s.
+    /// Safety net: if an active query gets no response (or its `>` prompt never arrives), advance
+    /// after 5 s. This is the fallback for the prompt-gated chain — it advances directly, and
+    /// clears any `pendingNext` first so a late prompt can't fire the same step twice.
     private func armActiveTimeout() {
         activeQueryTimeoutTask?.cancel()
         activeQueryTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self else { return }
 
+            self.pendingNext = nil
             switch self.queryState {
             case .queryingStandard:
                 self.beginInjectorPulseQuery()

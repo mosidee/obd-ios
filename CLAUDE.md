@@ -39,7 +39,7 @@ Five source files; four carry the logic, one is the app entry point.
 
 ## OBD Polling Chain (Active Polling mode)
 
-Each cycle executes in sequence; each parser calls the next `begin*Query()` on success, NRC (`7F`), or terminal error:
+Each cycle executes in sequence. On success, NRC (`7F`), or terminal error, a parser records the next step in `pendingNext` rather than calling it immediately; `route()` fires it when the ELM327's `>` prompt arrives (see "Command pacing" below). The chain:
 
 ```
 (first cycle only)  ATCEA + ATSH7E0                      ← header set once for the session
@@ -63,6 +63,10 @@ All four reads go through one shared `sendEngineQuery(_:state:status:resetParser
 > **Why active mode can persist the header but listen mode can't:** the active steady-state loop emits zero AT commands, so `ATSH7E0` cannot be perturbed — it's safe to set once. Listen mode toggles `ATCAF0`/`ATMA`/`" ATCAF1"` every cycle (the clone-unverified part), which *can* leave the adapter in a state where the next request's header is wrong, so it re-establishes per cycle.
 >
 > **Not yet verified on the vehicle:** session-persisting the header trusts that `ATSH7E0` survives across cycles (very likely, since nothing rewrites it). The `cycleGotData` self-heal is the safety net: if a whole cycle returns no data the header is re-established next cycle, so a clone that silently dropped its config recovers within one cycle rather than staying blank until reconnect. Symptom of a regression: enhanced reads blank with ~5 s watchdog stutters.
+
+### Command pacing (wait for the `>` prompt)
+
+The chain advances on the ELM327 **`>` prompt**, not on response-receipt. A parser that finishes a response records the next step in `pendingNext` (`.injector`/`.engineOil`/`.atf`/`.endCycle`) and returns; `route()` fires it via `dispatch(_:)` when the `>` line arrives (the manager emits `>` as its own sentinel line). Sending the next command *before* `>` — while the adapter is still in its inter-response wait — makes the ELM327 abort it with `STOPPED`, losing the command and stalling ~5 s on the watchdog (observed on-car before this fix). The `>` handler ignores prompts when `pendingNext` is nil (AT-command `OK`s during header re-establish, init). The watchdog is the fallback: it clears `pendingNext` and advances directly if no prompt/response arrives in 5 s. A stray `STOPPED` (or `NO DATA`/`ERROR`) is treated as a fast skip via `isTerminalLine`. The first command of each mode (`beginStandardQuery`, or listen's `beginInjectorPulseQuery`) is sent directly — there's no prior prompt to wait for.
 
 ## Listen Mode (alternating poll + passive standard-PID monitor)
 
@@ -140,7 +144,7 @@ Confirmed on-car (active-polling TX/RX capture, 2026-05-30):
 - **Header persistence optimization** — confirmed: only the first cycle sends `ATCEA + ATSH7E0`; later cycles send OBD commands only, no `7DF` restore. Self-heal never had to fire.
 
 Still open:
-- **`STOPPED` / pacing.** The adapter occasionally returned `STOPPED` (command aborted) for the first ~3 cycles, then ran clean at ~0.8 s/cycle. Cause: the app sends the next command on response-receipt without waiting for the `>` prompt, racing the ELM327's inter-response wait window — exposed by removing the per-read header re-send that used to provide ~300 ms of settle time. A lost command then waits for the 5 s watchdog (the ~5 s stutter). Fix not yet applied (options: gate on `>`, or append an expected-response count).
+- **`STOPPED` / pacing — fix applied, unverified on device.** The adapter occasionally returned `STOPPED` (command aborted) for the first ~3 cycles, then ran clean at ~0.8 s/cycle. Cause: the app sent the next command on response-receipt without waiting for the `>` prompt, racing the ELM327's inter-response wait — exposed by removing the per-read header re-send that used to provide ~300 ms of settle time. **Fix:** chaining is now prompt-gated (`pendingNext` + the `>` handler in `route()`; see "Command pacing"), and a stray `STOPPED` is treated as a fast skip rather than a 5 s watchdog stall. Needs an on-car run to confirm the stutters are gone.
 - **Leading-space `ATMA` stop** in listen mode — still unverified (the capture was active mode only).
 
 ## Preview
