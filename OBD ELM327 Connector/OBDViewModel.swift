@@ -53,11 +53,19 @@ final class OBDViewModel: ObservableObject {
     @Published private(set) var lastUpdate: Date?
     @Published private(set) var communicationLog: [OBDCommunicationLogEntry] = [] // TX commands and RX adapter lines.
     @Published private(set) var logFileError: String?
+    @Published private(set) var dataRowCount: Int = 0   // Rows written to the tuning CSV this session.
+    @Published private(set) var dataLogFileError: String?
 
-    let logFileURL: URL
+    // Per-connection session files (nil until the first line/sample is written this session).
+    @Published private(set) var currentTxRxFileURL: URL?
+    @Published private(set) var currentDataLogFileURL: URL?   // CSV of tuning values, shared via AirDrop.
 
-    var logFileName: String {
-        logFileURL.lastPathComponent
+    var logFileName: String? {
+        currentTxRxFileURL?.lastPathComponent
+    }
+
+    var dataLogFileName: String? {
+        currentDataLogFileURL?.lastPathComponent
     }
 
     // Exposed so ContentView can observe BLE-level details (peripheral name, raw state).
@@ -76,7 +84,10 @@ final class OBDViewModel: ObservableObject {
     private var parser = OBDParser()
 
     private let maxLogEntries = 120
-    private let logFileNameOnDisk = "obd_tx_rx_log.txt"
+    private let txRxFilePrefix = "obd_txrx_"   // + timestamp + ".txt", one file per connection
+    private let dataLogFilePrefix = "obd_tune_" // + timestamp + ".csv", one file per connection
+    private let dataLogHeader = "timestamp,STFT,LTFT,RPM,Throttle,Pedal,Coolant\n"
+    private var sessionTimestamp: Date?         // Set at connect; both session filenames derive from it
     private let defaultHeaderCommand = "ATSH7DF" // Functional OBD-II request header
     private let disableExtendedAddressCommand = "ATCEA"
     private let engineHeaderCommand = "ATSH7E0" // Toyota engine ECU request header (also carries the ATF oil-pan sensor on 7E0/7E8)
@@ -89,10 +100,9 @@ final class OBDViewModel: ObservableObject {
 
     // MARK: - Init
 
-    init() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        logFileURL = documentsURL.appendingPathComponent(logFileNameOnDisk)
+    private let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
 
+    init() {
         #if DEBUG
         if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" { return }
         #endif
@@ -102,7 +112,6 @@ final class OBDViewModel: ObservableObject {
                 self?.handleBLEStateChange(state)
             }
         }
-        prepareLogFileIfNeeded()
         startLineConsumer()
     }
 
@@ -110,18 +119,21 @@ final class OBDViewModel: ObservableObject {
 
     func connect() {
         communicationLog.removeAll()
-        resetLogFile()
+        sessionTimestamp = Date()        // Both session files derive their name from this connect time.
+        currentTxRxFileURL = nil         // Files are (re)created lazily on the first write this session.
+        currentDataLogFileURL = nil
+        dataRowCount = 0
         connectionStatus = "Scanning..."
         bluetooth.startScanning()
     }
 
     func savedLogText() -> String {
-        (try? String(contentsOf: logFileURL, encoding: .utf8)) ?? ""
+        guard let url = currentTxRxFileURL else { return "" }
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
     func clearSavedLog() {
         communicationLog.removeAll()
-        resetLogFile()
     }
 
     func disconnect() {
@@ -451,6 +463,7 @@ final class OBDViewModel: ObservableObject {
         if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
         if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
         lastUpdate = Date()
+        logTuningSample()
     }
 
     // MARK: - Active Parser — Standard OBD-II Mode 01
@@ -493,6 +506,7 @@ final class OBDViewModel: ObservableObject {
             if let v = values["07"] { ltft = Double(v[0]) * 100.0 / 128.0 - 100.0 }
             if let v = values["49"] { accelPedal = Double(v[0]) * 100.0 / 255.0 }
             lastUpdate = Date()
+            logTuningSample()
             beginEngineOilQuery()
             return
         }
@@ -552,28 +566,30 @@ final class OBDViewModel: ObservableObject {
         }
     }
 
-    private func prepareLogFileIfNeeded() {
-        guard !FileManager.default.fileExists(atPath: logFileURL.path) else { return }
-        resetLogFile()
-    }
-
-    private func resetLogFile() {
+    /// Lazily opens this connection's TX/RX file (named from `sessionTimestamp`) and writes
+    /// the banner header. Called on the first line written each session.
+    private func startTxRxSession() {
         logFileError = nil
-        let header = "OBD ELM327 Connector TX/RX Log\nStarted: \(Self.logTimestampFormatter.string(from: Date()))\n\n"
+        let stamp = sessionTimestamp ?? Date()
+        let url = documentsURL.appendingPathComponent(txRxFilePrefix + Self.fileTimestampFormatter.string(from: stamp) + ".txt")
+        let header = "OBD ELM327 Connector TX/RX Log\nStarted: \(Self.logTimestampFormatter.string(from: stamp))\n\n"
         do {
-            try header.write(to: logFileURL, atomically: true, encoding: .utf8)
+            try header.write(to: url, atomically: true, encoding: .utf8)
+            currentTxRxFileURL = url
         } catch {
             logFileError = error.localizedDescription
         }
     }
 
     private func appendEntryToLogFile(_ entry: OBDCommunicationLogEntry) {
+        if currentTxRxFileURL == nil { startTxRxSession() }
+        guard let url = currentTxRxFileURL else { return }
         logFileError = nil
         let line = "\(Self.logTimestampFormatter.string(from: entry.timestamp)) \(entry.direction.rawValue) \(entry.message)\n"
         guard let data = line.data(using: .utf8) else { return }
 
         do {
-            let handle = try FileHandle(forWritingTo: logFileURL)
+            let handle = try FileHandle(forWritingTo: url)
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
             try handle.close()
@@ -581,6 +597,112 @@ final class OBDViewModel: ObservableObject {
             logFileError = error.localizedDescription
         }
     }
+
+    // MARK: - Tuning Data Log (CSV)
+
+    /// Lazily opens this connection's CSV file (named from `sessionTimestamp`) and writes
+    /// the column header. Called on the first sample written each session.
+    private func startDataLogSession() {
+        dataLogFileError = nil
+        dataRowCount = 0
+        let stamp = sessionTimestamp ?? Date()
+        let url = documentsURL.appendingPathComponent(dataLogFilePrefix + Self.fileTimestampFormatter.string(from: stamp) + ".csv")
+        do {
+            try dataLogHeader.write(to: url, atomically: true, encoding: .utf8)
+            currentDataLogFileURL = url
+        } catch {
+            dataLogFileError = error.localizedDescription
+        }
+    }
+
+    /// Appends one CSV sample (all values from a single Mode-01 frame) when data logging
+    /// is enabled. Each column is fixed-precision, or empty when the value isn't yet known.
+    private func logTuningSample() {
+        guard UserDefaults.standard.bool(forKey: "dataLoggingEnabled") else { return }
+        if currentDataLogFileURL == nil { startDataLogSession() }
+        guard let url = currentDataLogFileURL else { return }
+        dataLogFileError = nil
+
+        let row = [
+            Self.logTimestampFormatter.string(from: Date()),
+            Self.csvField(stft, decimals: 2),
+            Self.csvField(ltft, decimals: 2),
+            Self.csvField(engineSpeed, decimals: 0),
+            Self.csvField(throttlePosition, decimals: 1),
+            Self.csvField(accelPedal, decimals: 1),
+            Self.csvField(coolantTemp, decimals: 1),
+        ].joined(separator: ",") + "\n"
+
+        guard let data = row.data(using: .utf8) else { return }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+            dataRowCount += 1
+        } catch {
+            dataLogFileError = error.localizedDescription
+        }
+    }
+
+    private static func csvField(_ value: Double?, decimals: Int) -> String {
+        guard let value else { return "" }
+        return String(format: "%.\(decimals)f", value)
+    }
+
+    // MARK: - Saved Log Files (manager)
+
+    struct LogFileInfo: Identifiable {
+        let id: URL
+        let name: String
+        let date: Date
+        let sizeText: String
+        let isCSV: Bool
+    }
+
+    /// All saved per-connection log files (both TX/RX and tuning CSV), newest first.
+    func savedLogFiles() -> [LogFileInfo] {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: documentsURL, includingPropertiesForKeys: keys)) ?? []
+        return contents
+            .filter { url in
+                let n = url.lastPathComponent
+                return n.hasPrefix(txRxFilePrefix) || n.hasPrefix(dataLogFilePrefix)
+            }
+            .map { url in
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                let date = values?.contentModificationDate ?? Date(timeIntervalSince1970: 0)
+                let bytes = values?.fileSize ?? 0
+                return LogFileInfo(
+                    id: url,
+                    name: url.lastPathComponent,
+                    date: date,
+                    sizeText: ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file),
+                    isCSV: url.pathExtension == "csv"
+                )
+            }
+            .sorted { $0.date > $1.date }
+    }
+
+    /// Deletes the given files; nulls the matching current-session reference if affected.
+    func deleteLogFiles(_ urls: [URL]) {
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
+            if url == currentTxRxFileURL { currentTxRxFileURL = nil }
+            if url == currentDataLogFileURL {
+                currentDataLogFileURL = nil
+                dataRowCount = 0
+            }
+        }
+    }
+
+    private static let fileTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
 
     private static let logTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -605,6 +727,8 @@ final class OBDViewModel: ObservableObject {
         vm.connectionStatus = "Active Polling"
         vm.isConnected   = true
         vm.lastUpdate    = Date()
+        vm.dataRowCount  = 128
+        vm.currentDataLogFileURL = vm.documentsURL.appendingPathComponent("obd_tune_preview.csv")
         return vm
     }
 #endif

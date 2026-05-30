@@ -8,7 +8,9 @@ import UIKit
 struct ContentView: View {
     @StateObject private var viewModel = OBDViewModel()
     @State private var showingSettings = false
+    @State private var showingLogManager = false
     @AppStorage("loggingEnabled") private var loggingEnabled: Bool = false
+    @AppStorage("dataLoggingEnabled") private var dataLoggingEnabled: Bool = false
 
     var body: some View {
         NavigationView {
@@ -18,6 +20,9 @@ struct ContentView: View {
                     fuelTrimCard
                     oilTempsCard
                     engineCard
+                    if dataLoggingEnabled {
+                        tuningDataLogCard
+                    }
                     if loggingEnabled {
                         communicationLogCard
                     }
@@ -34,9 +39,18 @@ struct ContentView: View {
                         Image(systemName: "gearshape")
                     }
                 }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { showingLogManager = true } label: {
+                        Image(systemName: "folder")
+                    }
+                    .accessibilityLabel("Saved logs")
+                }
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showingLogManager) {
+                LogManagerView(viewModel: viewModel)
             }
         }
     }
@@ -208,6 +222,46 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
+    // MARK: - Tuning Data Log (CSV)
+
+    private var tuningDataLogCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Tuning Data Log", systemImage: "tablecells")
+                    .font(.headline)
+                Spacer()
+                Text("\(viewModel.dataRowCount) rows")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Label(viewModel.dataLogFileName ?? "No file yet", systemImage: "doc.text")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if let error = viewModel.dataLogFileError {
+                Text("Log file error: \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+
+            if let url = viewModel.currentDataLogFileURL {
+                ShareLink(item: url) {
+                    Label("Share / AirDrop", systemImage: "square.and.arrow.up")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14))
+    }
+
     // MARK: - Communication Log
 
     private var communicationLogCard: some View {
@@ -262,7 +316,7 @@ struct ContentView: View {
 
     private var logFileControls: some View {
         HStack(spacing: 8) {
-            Label(viewModel.logFileName, systemImage: "doc.text")
+            Label(viewModel.logFileName ?? "No file yet", systemImage: "doc.text")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -406,6 +460,7 @@ struct SettingsView: View {
     @AppStorage("pollingDelay")    private var pollingDelay: Double = 1.0
     @AppStorage("keepScreenAwake") private var keepScreenAwake: Bool = true
     @AppStorage("loggingEnabled")  private var loggingEnabled: Bool = false
+    @AppStorage("dataLoggingEnabled") private var dataLoggingEnabled: Bool = false
     @AppStorage("listenOnlyMode")  private var listenOnlyMode: Bool = false
     @Environment(\.dismiss) private var dismiss
 
@@ -441,8 +496,13 @@ struct SettingsView: View {
                         }
                 }
 
-                Section("Diagnostics") {
+                Section {
+                    Toggle("Data Logging (CSV)", isOn: $dataLoggingEnabled)
                     Toggle("TX/RX Logging", isOn: $loggingEnabled)
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("Data Logging records STFT, LTFT, RPM, Throttle, Pedal and Coolant with timestamps to a CSV you can share via AirDrop for tuning.")
                 }
             }
             .navigationTitle("Settings")
@@ -452,6 +512,105 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Log Manager
+
+struct LogManagerView: View {
+    @ObservedObject var viewModel: OBDViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var files: [OBDViewModel.LogFileInfo] = []
+    @State private var selection = Set<URL>()
+    @State private var isEditing = false
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if files.isEmpty {
+                    ContentUnavailableView(
+                        "No Saved Logs",
+                        systemImage: "folder",
+                        description: Text("A log file is created each time you connect with logging enabled.")
+                    )
+                } else {
+                    List(files, selection: $selection) { info in
+                        row(info)
+                    }
+                    .environment(\.editMode, .constant(isEditing ? .active : .inactive))
+                }
+            }
+            .navigationTitle("Saved Logs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if !files.isEmpty {
+                        Button(isEditing ? "Cancel" : "Select") {
+                            isEditing.toggle()
+                            if !isEditing { selection.removeAll() }
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if isEditing {
+                        Button(allSelected ? "Deselect All" : "Select All") {
+                            selection = allSelected ? [] : Set(files.map(\.id))
+                        }
+                    }
+                }
+                ToolbarItemGroup(placement: .bottomBar) {
+                    if isEditing {
+                        ShareLink(items: Array(selection)) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(selection.isEmpty)
+                        Spacer()
+                        Button(role: .destructive) {
+                            viewModel.deleteLogFiles(Array(selection))
+                            selection.removeAll()
+                            reload()
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .disabled(selection.isEmpty)
+                    }
+                }
+            }
+            .onAppear(perform: reload)
+        }
+    }
+
+    private var allSelected: Bool {
+        !files.isEmpty && selection.count == files.count
+    }
+
+    private func reload() {
+        files = viewModel.savedLogFiles()
+        selection = selection.intersection(Set(files.map(\.id)))   // drop deleted/missing
+    }
+
+    @ViewBuilder
+    private func row(_ info: OBDViewModel.LogFileInfo) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: info.isCSV ? "tablecells" : "terminal")
+                .foregroundStyle(info.isCSV ? .blue : .green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(info.name)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(info.date.formatted(date: .abbreviated, time: .shortened)) · \(info.sizeText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(info.isCSV ? "CSV" : "TXT")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
         }
     }
 }
