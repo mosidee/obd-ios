@@ -31,11 +31,11 @@ Five source files; four carry the logic, one is the app entry point.
 
 **`OBDBluetoothManager.swift`** — Pure BLE transport for the Vgate adapter. Scans for ELM327 adapters (service UUIDs FFF0/18F0/FFE0; write FFF1/18F1/FFE1; notify FFF2/18F2/FFE1), manages the `CBCentralManager` lifecycle, buffers incoming chunks and splits on `\r` into an `AsyncStream<String>` of complete ELM327 lines. The `>` command prompt is emitted as its own sentinel line (used by the header-restore step). Contains zero OBD logic. `CBCentralManager` is created only when `startScanning()` is called (not at `init()`), which keeps SwiftUI previews safe. A 12 s watchdog (`armConnectionTimeout`) fails a stuck `.connecting` state.
 
-**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` `ObservableObject` state machine. Lines from `OBDBluetoothManager.lines` are consumed by one long-lived `streamTask` (never cancelled — the `AsyncStream` is not restartable) and routed by `route()` based on `QueryState`, decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `engineSpeed`, `throttlePosition`, `accelPedal`, plus `connectionStatus` / `isConnected` / `lastUpdate` and the `communicationLog`.
+**`OBDViewModel.swift`** — All OBD logic. A `@MainActor` `ObservableObject` state machine. Lines from `OBDBluetoothManager.lines` are consumed by one long-lived `streamTask` (never cancelled — the `AsyncStream` is not restartable) and routed by `route()` based on `QueryState`, decoded via an owned `OBDParser` (`private var parser = OBDParser()`). Publishes `stft`, `ltft`, `coolantTemp`, `engineOilTemp`, `atfTemp`, `engineSpeed`, `throttlePosition`, `engineLoad`, plus `connectionStatus` / `isConnected` / `lastUpdate` and the `communicationLog`.
 
 **`OBDParser.swift`** — Frame decoding, extracted from `OBDViewModel` so it's unit-testable without `@MainActor`/Bluetooth. A `struct` holding the multi-frame accumulation state; exposes `completePayloadTokens(from:)` (mutating, multi-frame), `responsePayloadTokens(from:)` (stateless, single-frame), `reset()`, and the statics `mode01Values(from:lengths:)` and `rawByte(after:in:)`. Contains zero CoreBluetooth or UI code.
 
-**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders four cards: Fuel Trims (STFT + LTFT cells; the header shows the STFT+LTFT total), Fluid Temperatures (Coolant / Trans Fluid / Engine Oil, each with a Normal/Warm/Hot colour badge), Engine (RPM / Throttle / Pedal), and an optional live TX/RX log card shown only when the `loggingEnabled` setting is on. Includes a `SettingsView` sheet — Listen-Only toggle, polling interval slider (0.5–10 s), keep-screen-awake (`UIApplication.shared.isIdleTimerDisabled`), and the TX/RX logging toggle — all `@AppStorage`-backed. Uses a `#if DEBUG` extension `init(viewModel:)` + the `OBDViewModel.preview` static factory for SwiftUI previews.
+**`ContentView.swift`** — Observes `OBDViewModel` via `@StateObject`. Renders four cards: Fuel Trims (STFT + LTFT cells; the header shows the STFT+LTFT total), Fluid Temperatures (Coolant / Trans Fluid / Engine Oil, each with a Normal/Warm/Hot colour badge), Engine (RPM / Throttle / Load), and an optional live TX/RX log card shown only when the `loggingEnabled` setting is on. Includes a `SettingsView` sheet — Listen-Only toggle, polling interval slider (0.5–10 s), keep-screen-awake (`UIApplication.shared.isIdleTimerDisabled`), and the TX/RX logging toggle — all `@AppStorage`-backed. Uses a `#if DEBUG` extension `init(viewModel:)` + the `OBDViewModel.preview` static factory for SwiftUI previews.
 
 ## OBD Polling Chain (Active Polling mode)
 
@@ -43,12 +43,12 @@ Each cycle executes in sequence; each parser calls the next `begin*Query()` on s
 
 ```
 passive (pollingDelay wait, default 1.0 s)
-  → queryingStandard    ATSH7E0 + 01 05 0C 11 06 07 49   (SAE J1979 Mode-01 multi-PID)
+  → queryingStandard    ATSH7E0 + 01 05 0C 11 06 07 04   (SAE J1979 Mode-01 multi-PID)
                                           coolant  05 → A−40 → °C
                                           RPM      0C → (256A+B)/4
                                           throttle 11 → A×100/255 %
                                           STFT/LTFT 06/07 → A×100/128−100 %
-                                          accel    49 → A×100/255 %
+                                          load     04 → A×100/255 %
   → queryingEngineOil   ATSH7E0 + 2151  engine oil: payload[11] − 40 → °C  (Toyota enhanced)
   → queryingATF         ATSH7E0 + 2182  ATF:        first byte after [61 82] − 40 → °C  (Toyota enhanced)
   → restoringHeader     ATCEA + ATSH7DF
@@ -61,7 +61,7 @@ Before sending each command, every `begin*Query()` sends `ATCEA` (disable CAN ex
 
 ## Listen Mode (alternating poll + passive standard-PID monitor)
 
-This is the mode that lets the app coexist with the Avance48 gas ECU on the shared bus. Gated by the `listenOnlyMode` setting (read in `runELM327Init()` into `listenModeActive`, so it applies on connect). Because the six standard values (coolant/RPM/throttle/STFT/LTFT/pedal) have generic Mode-01 PIDs another tester is already polling, but engine oil and ATF do **not**, and the ELM327 can't monitor (`ATMA`) and request at the same time, the mode **alternates**:
+This is the mode that lets the app coexist with the Avance48 gas ECU on the shared bus. Gated by the `listenOnlyMode` setting (read in `runELM327Init()` into `listenModeActive`, so it applies on connect). Because the six standard values (coolant/RPM/throttle/STFT/LTFT/load) have generic Mode-01 PIDs another tester is already polling, but engine oil and ATF do **not**, and the ELM327 can't monitor (`ATMA`) and request at the same time, the mode **alternates**:
 
 ```
 beginListenOnly()  ATCM7FF + ATCF7E8   (mask 0x7FF / filter 0x7E8 = exactly 7E8, the engine ECU's response ID)
@@ -115,16 +115,16 @@ let delay = stored > 0 ? stored : 1.0   // seconds between cycles
 
 ## Logging (TX/RX + Tuning CSV)
 
-Two independent logs, each gated by its own `@AppStorage` toggle, both written to the Documents directory as **one timestamped file per connection** (created lazily on the first write of a session, so a session with the toggle off leaves no file). A single `sessionTimestamp` captured in `connect()` names both files for that connection:
+Two independent logs, each gated by its own `@AppStorage` toggle, both written to the Documents directory as **one timestamped file per connection** (created lazily on the first write of a session, so a session with the toggle off — or one that logs nothing — leaves no file). A single `sessionTimestamp` captured in `connect()` names both files for that connection:
 
 - **TX/RX diagnostic log** (`loggingEnabled`): every sent command and received line is appended to the in-memory `communicationLog` (capped at `maxLogEntries = 120`) and to `obd_txrx_<yyyy-MM-dd_HH-mm-ss>.txt`. The log card in `ContentView` shows the live tail with copy/clear; "clear" now only empties the on-screen `communicationLog` (file deletion lives in the manager). When the toggle is off, `appendLog` returns early.
-- **Tuning CSV** (`dataLoggingEnabled`): one row per decoded standard Mode-01 frame — `timestamp,STFT,LTFT,RPM,Throttle,Pedal,Coolant` (all sampled from the same frame) — written via `logTuningSample()` in both `parseStandardLine` and `parseListeningLine` to `obd_tune_<yyyy-MM-dd_HH-mm-ss>.csv`. The Tuning Data Log card shows the row count and a `ShareLink` (AirDrop) to the current session file.
+- **Tuning CSV** (`dataLoggingEnabled`): one row per decoded standard Mode-01 frame — `timestamp,STFT,LTFT,RPM,Throttle,EngineLoad,Coolant` (all sampled from the same frame) — written via `logTuningSample()` in both `parseStandardLine` and `parseListeningLine` to `obd_tune_<yyyy-MM-dd_HH-mm-ss>.csv`. The Tuning Data Log card shows the row count and a `ShareLink` (AirDrop) to the current session file.
 
 `currentTxRxFileURL` / `currentDataLogFileURL` are published optionals pointing at the active-session files (nil until the first write). `OBDViewModel.savedLogFiles()` lists all `obd_txrx_*`/`obd_tune_*` files (newest first) and `deleteLogFiles(_:)` removes them. `LogManagerView` (a sheet opened from the folder toolbar button, always reachable regardless of toggles) presents the saved files with a selection mode — Select All / Deselect All, then Share (AirDrop the selected set) or Delete.
 
 ## On-car Verification Status
 
-The standard Mode-01 path for the five live values (coolant/RPM/throttle/STFT/LTFT — and the accel-pedal PID `49`) is **not yet confirmed on this specific car**; the captured transcripts only ever confirmed the older Toyota-enhanced `2101` coolant/RPM path on the Sienta. The enhanced `2101`/`2103` path has since been removed — both modes now use standard Mode-01 frames for these values. The leading-space `ATMA` stop in listen mode is likewise unverified on the Vgate clone (see Listen Mode above). Treat both as open until validated on the vehicle.
+The standard Mode-01 path for the five live values (coolant/RPM/throttle/STFT/LTFT — and the engine-load PID `04`) is **not yet confirmed on this specific car**; the captured transcripts only ever confirmed the older Toyota-enhanced `2101` coolant/RPM path on the Sienta. The enhanced `2101`/`2103` path has since been removed — both modes now use standard Mode-01 frames for these values. The leading-space `ATMA` stop in listen mode is likewise unverified on the Vgate clone (see Listen Mode above). Treat both as open until validated on the vehicle.
 
 ## Preview
 

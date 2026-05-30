@@ -34,7 +34,7 @@ After init, branch: **listen mode** if the setting is on, else **active polling*
 | Throttle position | **Standard** | Mode-01 PID `11` |
 | Short fuel trim (STFT) | **Standard** | Mode-01 PID `06` |
 | Long fuel trim (LTFT) | **Standard** | Mode-01 PID `07` |
-| Accel pedal | **Standard** | Mode-01 PID `49` |
+| Engine load | **Standard** | Mode-01 PID `04` |
 | Engine oil temp | **Custom (Toyota enhanced)** | Mode-21 PID `2151` |
 | Trans fluid / ATF temp | **Custom (Toyota enhanced)** | Mode-21 PID `2182` |
 
@@ -56,10 +56,10 @@ each PID byte followed by its data bytes.
 | `11` | 1 (A) | `A × 100 / 255` | % |
 | `06` | 1 (A) | `A × 100 / 128 − 100` | % |
 | `07` | 1 (A) | `A × 100 / 128 − 100` | % |
-| `49` | 1 (A) | `A × 100 / 255` | % |
+| `04` | 1 (A) | `A × 100 / 255` | % |
 
-**Multi-PID request used by both modes:** `01 05 0C 11 06 07 49`
-**Response example:** `41 05 5C 0C 0B 7F 11 2B 06 80 07 7E 49 1A` (14 data bytes → arrives
+**Multi-PID request used by both modes:** `01 05 0C 11 06 07 04`
+**Response example:** `41 05 5C 0C 0B 7F 11 2B 06 80 07 7E 04 1A` (14 data bytes → arrives
 as a multi-frame ISO-TP response, see §6).
 
 > Fuel trim has two scalings. **Standard PID `06`/`07` uses `×100/128 − 100`.** (The old
@@ -86,7 +86,7 @@ STEP 1 — Standard batch:
    send ATCEA          (150 ms)
    send ATSH7E0        (150 ms)   ← engine ECU header
    send "01 05 0C 11 06 07 49"
-   on 41 response: decode coolant/RPM/throttle/STFT/LTFT/pedal  → STEP 2
+   on 41 response: decode coolant/RPM/throttle/STFT/LTFT/load  → STEP 2
 STEP 2 — Engine oil (enhanced):
    send ATCEA          (150 ms)
    send ATSH7E0        (150 ms)
@@ -185,7 +185,7 @@ corrupt earlier values. Length map: `{05:1, 0C:2, 11:1, 06:1, 07:1, 49:1}`.
 
 | | Active polling | Listen mode |
 |---|---|---|
-| Coolant/RPM/throttle/STFT/LTFT/pedal | **Requested** (`01 05 0C 11 06 07 49`) | **Sniffed** from another tester's `41` frames |
+| Coolant/RPM/throttle/STFT/LTFT/load | **Requested** (`01 05 0C 11 06 07 04`) | **Sniffed** from another tester's `41` frames |
 | Engine oil / ATF | **Requested** (`2151`/`2182`) | **Requested** (`2151`/`2182`) — same as active |
 | Bus behaviour | Transmits every cycle | Transmits oil/ATF, then monitors |
 | `CAF` state | On throughout | Toggled (on=poll, off=monitor) |
