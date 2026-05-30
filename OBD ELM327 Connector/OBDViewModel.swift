@@ -4,12 +4,17 @@
 //
 //  OBD polling loop — every `pollingDelay` seconds (default 1.0 s) an active query cycle runs in sequence:
 //
-//    Standard   : ATSH7E0 + 01 05 0C 11 06 07 04 — coolant/RPM/throttle/STFT/LTFT/engine load (SAE J1979 Mode-01)
-//    Engine oil : ATSH7E0 + 2151, payload[11] − 40 → °C  (Toyota mode-21, PID 51)
-//    ATF        : ATSH7E0 + 2182, raw − 40 → °C          (Toyota mode-21, PID 82)
+//    Standard   : 01 05 0C 11 06 07 04 — coolant/RPM/throttle/STFT/LTFT/engine load (SAE J1979 Mode-01)
+//    Injector   : 213C, (256·C + D) / 1000 → ms   (Toyota mode-21, PID 3C; 2nd 16-bit field)
+//    Inj. volume: 2137, (256·A + B) × 2.047 / 65535 → ml (Toyota mode-21, PID 37; multi-frame)
+//    Engine oil : 2151, payload[11] − 40 → °C      (Toyota mode-21, PID 51)
+//    ATF        : 2182, raw − 40 → °C              (Toyota mode-21, PID 82)
 //
-//  After all responses are handled, ATSH7DF is restored and the cycle repeats.
-//  (Engine oil and ATF have no standard Mode-01 equivalent on this ECU, so they stay enhanced.)
+//  The engine header (ATSH7E0) is established once per session and reused — the steady-state loop
+//  sends no AT commands and there is no per-cycle ATSH7DF restore, so a cycle is just the wait plus
+//  the five reads. Steps advance on the ELM327 `>` prompt (see `route`), not on response-receipt.
+//  (Injector, injection volume, engine oil, and ATF have no standard Mode-01 equivalent on this
+//  ECU, so they stay Toyota-enhanced.)
 
 import Foundation
 import Combine

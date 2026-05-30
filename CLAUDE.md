@@ -148,10 +148,10 @@ Confirmed on-car (active-polling TX/RX capture, 2026-05-30):
 - **Injector pulse width `213C`** — **confirmed against Car Scanner.** Decode is the second 16-bit field `(256·C + D)/1000 → ms`: a Car Scanner capture read 2.8–2.9 ms while `C·D` decoded to 2.87–2.95 ms (warm idle). `C·D` is the live fuel-corrected value; the first field `A·B` is a slow staircase (averaged). The earlier `21F3` guess returned `7F 21 12` (not supported) and was replaced.
 - **Injection volume `2137`** — **confirmed against Car Scanner** (~1.6 ml idle; the capture's `C8 A2` first field × 2.047/65535 = 1.604 ml). Multi-frame (declared `0x11`). Community lists put the volume formula on `213C`, but on this car `213C` is pulse width and `2137` is the volume.
 - **Header persistence optimization** — confirmed: only the first cycle sends `ATCEA + ATSH7E0`; later cycles send OBD commands only, no `7DF` restore. Self-heal never had to fire.
+- **`STOPPED` / pacing fix — confirmed (2026-05-31).** The adapter used to return `STOPPED` (command aborted) for the first ~3 cycles, then ran clean at ~0.8 s/cycle. Cause: the app sent the next command on response-receipt without waiting for the `>` prompt, racing the ELM327's inter-response wait — exposed by removing the per-read header re-send that used to provide ~300 ms of settle time. **Fix:** chaining is now prompt-gated (`pendingNext` + the `>` handler in `route()`; see "Command pacing"), and a stray `STOPPED` is treated as a fast skip rather than a 5 s watchdog stall. An on-car run confirmed the full five-read cycle (standard + injector `213C` + injection volume `2137` + oil + ATF) polls cleanly without the stutters.
 
 Still open:
-- **`STOPPED` / pacing — fix applied, unverified on device.** The adapter occasionally returned `STOPPED` (command aborted) for the first ~3 cycles, then ran clean at ~0.8 s/cycle. Cause: the app sent the next command on response-receipt without waiting for the `>` prompt, racing the ELM327's inter-response wait — exposed by removing the per-read header re-send that used to provide ~300 ms of settle time. **Fix:** chaining is now prompt-gated (`pendingNext` + the `>` handler in `route()`; see "Command pacing"), and a stray `STOPPED` is treated as a fast skip rather than a 5 s watchdog stall. Needs an on-car run to confirm the stutters are gone.
-- **Leading-space `ATMA` stop** in listen mode — still unverified (the capture was active mode only).
+- **Leading-space `ATMA` stop** in listen mode — still unverified (the on-car runs have been active mode only).
 
 ## Preview
 

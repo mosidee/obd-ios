@@ -80,14 +80,12 @@ Request `21 <pid>`. Response begins with `61`, then the PID byte, then data.
 > `payload` = the assembled ISO-TP payload starting at `61`. So `payload[0]=61`,
 > `payload[1]=51`, `payload[11]` = oil temp raw.
 
-> **`213C` is confirmed on-car** (it responds with data; Car Scanner shows the value in ms). The
-> response carries **two** 16-bit fields. The live injector pulse width is the **second** one
-> (`C·D`): on-car captures show it wobbles with fuel correction (~4 ms idle) and rises under load
-> (~7.9 ms), while the first field `A·B` is a slow staircase (an averaged/adapted value that
-> barely moves under load). The `/1000` scaling is a best fit to an idle ~4 ms reading — cross-check
-> the divisor against a known Car Scanner value, and confirm the field by revving (Car Scanner's
-> injector PW should jump to ~7–8 ms, tracking `C·D`). (The earlier `21F3` guess returned `7F 21 12`
-> — not supported — and was replaced by `213C`.)
+> **`213C` is confirmed on-car against Car Scanner.** The response carries **two** 16-bit fields.
+> The live injector pulse width is the **second** one (`C·D`): a Car Scanner capture read 2.8–2.9 ms
+> while `C·D` decoded to 2.87–2.95 ms (warm idle), and it rises under load — while the first field
+> `A·B` is a slow staircase (an averaged/adapted value that barely moves under load). The `/1000`
+> scaling converts the µs field to ms. (The earlier `21F3` guess returned `7F 21 12` — not supported
+> — and was replaced by `213C`.)
 
 > **`2137` (injection volume) is confirmed on-car**: a Car Scanner capture showed 1.6 ml while the
 > first 16-bit field (`C8 A2` = 51362) × 2.047/65535 = 1.604 ml. Note the community lists attribute
@@ -254,10 +252,10 @@ corrupt earlier values. Length map: `{05:1, 0C:2, 11:1, 06:1, 07:1, 04:1}`.
 - **Injection volume `2137`** = `(256·A + B) × 2.047 / 65535 → ml` (first 16-bit field; multi-frame).
   **Confirmed against Car Scanner**: capture showed 1.6 ml, `C8 A2` × 2.047/65535 = 1.604 ml.
   Community lists put this formula on `213C`; on this car `213C` is pulse width and `2137` the volume.
-- **`STOPPED` / pacing (fix applied, unverified on device):** sending the next command on
+- **`STOPPED` / pacing (fix confirmed on-car, 2026-05-31):** sending the next command on
   response-receipt (not on `>`) raced the ELM327's inter-response wait and got the command
-  aborted (`STOPPED`) → 5 s watchdog stutter (seen for the first few cycles, then settled). Now
-  fixed by gating each step on the `>` prompt; a stray `STOPPED` is also treated as a fast skip.
-  Needs an on-car run to confirm.
+  aborted (`STOPPED`) → 5 s watchdog stutter (seen for the first few cycles, then settled). Fixed
+  by gating each step on the `>` prompt; a stray `STOPPED` is also treated as a fast skip. An
+  on-car active-polling run confirmed the full five-read cycle paces cleanly without the stutters.
 - The `" ATCAF1"` ATMA-stop trick is the one adapter-dependent behaviour still to verify (the
   on-car capture was active mode only).

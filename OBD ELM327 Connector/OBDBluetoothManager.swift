@@ -145,7 +145,7 @@ final class OBDBluetoothManager: NSObject, ObservableObject {
     /// Appends a raw BLE chunk to the buffer and emits complete lines.
     /// ELM327 uses \r as the line terminator. The ">" command prompt is emitted
     /// as a special sentinel line so the state machine can detect when the adapter
-    /// is ready for the next command (used when restoring the OBD header).
+    /// is ready for the next command (used to pace each step of the poll chain).
     private func processIncoming(_ chunk: String) {
         receiveBuffer += chunk
         while true {
